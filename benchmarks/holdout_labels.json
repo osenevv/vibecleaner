@@ -1,0 +1,97 @@
+{
+  "cases": {
+    "positive/h01_clinic_pager_dotenv": {
+      "expected": ["D1"],
+      "why": "apps/clinic-pager/.env is committed with an OpenAI sk-proj key, a Supabase service_role JWT, and CLINIC_PAGER_SECRET. settings.py only reads os.environ and contains no secret literals."
+    },
+    "positive/h02_circle_boards_norls": {
+      "expected": ["D2"],
+      "why": "circle_boards, board_posts, and post_bookmarks are created in supabase/migrations with no ENABLE ROW LEVEL SECURITY and no CREATE POLICY."
+    },
+    "positive/h03_yard_hold_open": {
+      "expected": ["D3"],
+      "why": "POST /yards/{yard_code}/holds inserts a dock hold. FastAPI() has no router dependencies and the handler has no session check. The body is a Pydantic model with no identity or price field."
+    },
+    "positive/h04_pipeline_grant_role": {
+      "expected": ["D4"],
+      "why": "The grant route checks a CRM session and validates with Zod, then stores org_id and role from the body and treats is_admin from that body as the approval decision."
+    },
+    "positive/h05_tutor_system_blend": {
+      "expected": ["D5"],
+      "why": "system_for concatenates learner_note into the LangGraph system message. The coach route depends on current_tutor, checks the enrollment server-side, and parses a Pydantic body. There is no tool call."
+    },
+    "positive/h06_ward_round_validator": {
+      "expected": ["D6a"],
+      "why": "Round notes use Pydantic v1 @validator and SavedRound.dict() with class Config orm_mode. The handler authenticates the nurse and inserts a real ward_rounds row."
+    },
+    "positive/h07_circle_digest_stub": {
+      "expected": ["D6b"],
+      "why": "The digest route authenticates a member and parses the window with Zod, then returns a TODO placeholder list of circles instead of ranking circle_reads."
+    },
+    "positive/h08_trailer_slot_queries": {
+      "expected": ["D7a"],
+      "why": "trailer_board authenticates the clerk, checks the yard assignment, and LIMITs the trailer list, then runs a dock_slots SELECT inside the for-loop."
+    },
+    "positive/h09_circle_flag_rawbody": {
+      "expected": ["D7b"],
+      "why": "The flag route authenticates the member from circle_sessions, then inserts req.body.reason and req.body.detail with no Zod or Pydantic schema."
+    },
+    "positive/h10_bridge_webhook_tool": {
+      "expected": ["D5"],
+      "why": "page_bridge posts the model tool-argument string as a webhook URL with no allow-list, schema check, or approval. The system prompt is constant, the note stays in the user role, and the route requires an operator session plus a Pydantic body."
+    },
+    "negative/h11_visit_reschedule_action": {
+      "expected": [],
+      "why": "The server action calls auth(), rejects a missing session, validates with Zod, and updates clinic_visits only where patient_id equals session.user.id."
+    },
+    "negative/h12_account_stage_router": {
+      "expected": [],
+      "why": "router.use(requireAuth) runs before the stage route. The body is Zod-parsed and the update is scoped to the user id loaded by that middleware."
+    },
+    "negative/h13_pallet_receipt_app": {
+      "expected": [],
+      "why": "app = FastAPI(dependencies=[Depends(verify_api_key)]) covers the receipt route, which has no local dependency. The body is a Pydantic model and the lane is loaded from dock_lanes."
+    },
+    "negative/h14_study_circle_rls": {
+      "expected": [],
+      "why": "The same migration creates quoted study_circles and reading_goals, enables row level security on both, and adds select, insert, update, and delete policies."
+    },
+    "negative/h15_dock_rank_memory": {
+      "expected": [],
+      "why": "rank_loads and the helpers walk in-memory lists and only do arithmetic. The module performs no database or HTTP calls."
+    },
+    "negative/h16_reply_userid_session": {
+      "expected": [],
+      "why": "The reply route validates with Zod, rejects a userId that differs from the forum session, and inserts author_id from that session."
+    },
+    "negative/h17_followup_user_role": {
+      "expected": [],
+      "why": "The follow-up route requires a clinician session and confirms the visit. The summary is sent only as the user message under a constant system string, and the insert uses the session clinician id."
+    },
+    "negative/h18_bay_chart_keyerror": {
+      "expected": [],
+      "why": "bay_for catches KeyError and returns the caller-supplied default. The handler is narrow and the overflow fallback is intentional."
+    },
+    "negative/h19_agent_env_lookup": {
+      "expected": [],
+      "why": "load_runtime reads OPENAI_API_KEY, AGENT_BUS_SECRET, and SUPABASE_URL from the environment. The module contains no secret literals and no .env file."
+    },
+    "negative/h20_course_price_allowlist": {
+      "expected": [],
+      "why": "Checkout accepts priceId, keeps it only when it is in COURSE_PRICE_ALLOWLIST, and sends that server price id to Stripe with quantity 1. The learner id comes from the campus session."
+    }
+  },
+  "_meta": {
+    "schema_version": 1,
+    "granularity": "case",
+    "case_key": "<positive|negative>/<directory name> relative to benchmarks/holdout/",
+    "entry_shape": {"expected": ["D1"], "why": "short rationale"},
+    "detector_ids": ["D1", "D2", "D3", "D4", "D5", "D6a", "D6b", "D7a", "D7b"],
+    "layers": {
+      "1": ["D1", "D2", "D6a"],
+      "2": ["D3", "D4", "D5", "D6b", "D7a", "D7b"]
+    },
+    "scoring": "A case is a set of detector ids. True positive, false positive, and false negative counts are computed per (case, detector) pair against expected. Negatives use an empty expected set.",
+    "sweep": "Layer-1 findings have probability null and always count. Layer-2 findings count when probability is greater than or equal to the threshold."
+  }
+}

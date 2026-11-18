@@ -1,0 +1,114 @@
+{
+  "cases": {
+    "positive/b01_vet_pager_dotenv": {
+      "expected": ["D1"],
+      "why": "The committed vet-pager .env contains an OpenAI sk-proj key, a Supabase service_role JWT, and a high-entropy PAGER_WEBHOOK_SECRET. browser-env.ts also assigns a private key to NEXT_PUBLIC_OPENAI_API_KEY. settings.py only reads the environment."
+    },
+    "positive/b02_podcast_show_rls": {
+      "expected": ["D2"],
+      "why": "episodes is created with no ENABLE ROW LEVEL SECURITY. ad_reads enables row level security and never gets a CREATE POLICY. shows has both."
+    },
+    "positive/b03_cafeteria_blackout_post": {
+      "expected": ["D3"],
+      "why": "GET calls assert_signed_in, but POST inserts a lunch blackout with no auth check and no middleware. The Zod body has a service date, meal period, and reason."
+    },
+    "positive/b04_meter_settlement_open": {
+      "expected": ["D3"],
+      "why": "ensure_staff is attached only to the feeders router. POST /settlements/windows calls the billed GridSettle API and inserts the confirmation with a Pydantic body and no dependency."
+    },
+    "positive/b05_listing_org_query": {
+      "expected": ["D4"],
+      "why": "gatekeeper only checks that a broker cookie exists. The listing update scopes brokerage_id to org_id taken from the query string. The patch body is Zod-validated and has no price field."
+    },
+    "positive/b06_club_dues_amount": {
+      "expected": ["D4"],
+      "why": "verify_pin_session protects checkout and the plan row is loaded, but the gateway charge uses amount_cents from the body instead of ClubPlan.dues_cents."
+    },
+    "positive/b07_matter_standing_prompt": {
+      "expected": ["D5"],
+      "why": "assert_signed_in protects the route and the passage stays in the user role, but the system prompt is an f-string of standing_instructions, which counsel edit on the matter profile page."
+    },
+    "positive/b08_tote_shell_tool": {
+      "expected": ["D5"],
+      "why": "The LangGraph release_tote tool checks the pin session and validates a Pydantic string, then runs that string through subprocess with shell=True and no command allow-list."
+    },
+    "positive/b09_hire_validator_legacy": {
+      "expected": ["D6a"],
+      "why": "The equipment route is authenticated and the insert is parameterized, but the body model uses Pydantic v1 @validator and .dict()."
+    },
+    "positive/b10_ferry_quote_stub": {
+      "expected": ["D6b"],
+      "why": "quoteFerry requires withMember and parses a Zod request, then returns a TODO stub whose carrier, fare, and quote reference are hardcoded."
+    },
+    "positive/b11_squad_promise_fanout": {
+      "expected": ["D7a"],
+      "why": "After withMember, the handler findMany()s every manager with no take, then Promise.all runs a squadSlot findMany inside the map."
+    },
+    "positive/b12_donor_note_rawbody": {
+      "expected": ["D7b"],
+      "why": "gatekeeper sets donorId from the session cookie, but the notes route inserts note, campaign, and dedication from an untyped req.body with no Zod schema."
+    },
+    "negative/b01_vet_dispense_router": {
+      "expected": [],
+      "why": "The dispense route relies on APIRouter(dependencies=[Depends(ensure_staff)]) and does not repeat that dependency. The patient must belong to the session clinic, and the unit price comes from the formulary row. CORS allows one origin with credentials."
+    },
+    "negative/b02_matter_middleware": {
+      "expected": [],
+      "why": "middleware.ts matches /api/matters/:path* and assert_signed_in rejects a missing counsel cookie. The exhibit route writes a Zod body and does not check auth itself."
+    },
+    "negative/b03_meter_session_match": {
+      "expected": [],
+      "why": "requireTenant supplies the session. A body user_id is rejected unless it equals the session user, and the insert stores principal.user_id. The meter must belong to the session tenant."
+    },
+    "negative/b04_contest_fee_catalog": {
+      "expected": [],
+      "why": "enterContest requires withMember. A client amount is parsed and ignored; the wallet debit uses contest.entryFeeCents from the catalog row."
+    },
+    "negative/b05_itinerary_user_role": {
+      "expected": [],
+      "why": "The system prompt is a constant. The traveler question and the published fare-rule card stay in the user message. The route requires assert_signed_in and a Pydantic body."
+    },
+    "negative/b06_bay_allowlist_tool": {
+      "expected": [],
+      "why": "hold_bay checks the pin session, validates a Pydantic model, rejects bay codes and actions outside an allow-list, and posts to a fixed controller URL."
+    },
+    "negative/b07_episode_batch_page": {
+      "expected": [],
+      "why": "withMember is applied with app.use before the rollup route. Episodes use limit/offset, and plays are loaded with one inArray query. The query params are Zod-parsed."
+    },
+    "negative/b08_pledge_timeout_log": {
+      "expected": [],
+      "why": "ensure_staff protects capture. The charged amount is read from the pledge row. GatewayTimeout is logged and returned as HTTP 502."
+    },
+    "negative/b09_brokerage_fee_table": {
+      "expected": [],
+      "why": "commission.py is a published basis-point schedule and two pure calculations. It has no route, query, secret literal, or placeholder response."
+    },
+    "negative/b10_hire_packet_rls": {
+      "expected": [],
+      "why": "hire_packets and policy_acks each ENABLE ROW LEVEL SECURITY and have CREATE POLICY statements scoped to auth.uid()."
+    },
+    "negative/b11_lunch_env_example": {
+      "expected": [],
+      "why": ".env.example holds only placeholders such as your-openai-key and replace-with-vendor-secret. settings.py reads the process environment and embeds no secret literal."
+    },
+    "negative/b12_membership_freeze_gate": {
+      "expected": [],
+      "why": "verify_pin_session is mounted on /memberships in app.ts. The freeze route parses req.body with Zod, updates the session member with a parameterized query, and logs then rethrows errors."
+    }
+  },
+  "_meta": {
+    "schema_version": 1,
+    "granularity": "case",
+    "case_key": "<positive|negative>/<directory name> relative to benchmarks/blind",
+    "entry_shape": {"expected": ["D1"], "why": "short rationale"},
+    "detector_ids": ["D1", "D2", "D3", "D4", "D5", "D6a", "D6b", "D7a", "D7b"],
+    "layers": {
+      "1": ["D1", "D2", "D6a"],
+      "2": ["D3", "D4", "D5", "D6b", "D7a", "D7b"]
+    },
+    "scoring": "A case is a set of detector ids. True positive, false positive, and false negative counts are computed per (case, detector) pair against expected. Negatives use an empty expected set.",
+    "sweep": "Layer-1 findings have probability null and always count. Layer-2 findings count when probability is greater than or equal to the threshold.",
+    "set": "blind"
+  }
+}
