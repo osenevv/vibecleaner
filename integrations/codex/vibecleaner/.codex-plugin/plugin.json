@@ -1,0 +1,20 @@
+{
+  "name": "vibecleaner",
+  "version": "0.1.0",
+  "description": "Runs VibeCleaner from Codex so the repository is ready to ship.",
+  "author": {
+    "name": "Vladimir Osenev"
+  },
+  "license": "MIT",
+  "keywords": ["security", "slop", "audit", "vibecleaner"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "VibeCleaner",
+    "shortDescription": "Ship-ready scan and fix for agent code.",
+    "developerName": "Vladimir Osenev",
+    "category": "Productivity",
+    "defaultPrompt": [
+      "Run VibeCleaner and relay what it prints."
+    ]
+  }
+}

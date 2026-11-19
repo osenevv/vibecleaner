@@ -1,0 +1,24 @@
+{
+  "vibecleaner": {
+    "enabled": true,
+    "PostToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/vibecleaner-hook.sh post-tool",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./scripts/vibecleaner-hook.sh stop",
+        "timeout": 120
+      }
+    ]
+  }
+}

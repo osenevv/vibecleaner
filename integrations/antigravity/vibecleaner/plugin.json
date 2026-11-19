@@ -1,0 +1,17 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "vibecleaner",
+  "displayName": "VibeCleaner",
+  "version": "0.1.0",
+  "description": "Scans AI-generated code for security holes and slop with deterministic checks plus Layer 2, and blocks the agent from finishing while findings remain.",
+  "suggestedPrompts": [
+    "Audit this branch with VibeCleaner and fix every finding",
+    "Run vibecleaner scan --diff main and walk me through VIBECLEANER_REPORT.md",
+    "Fix the critical VibeCleaner findings, using --fix only as a draft"
+  ],
+  "author": {
+    "name": "Vladimir Osenev"
+  },
+  "license": "MIT",
+  "keywords": ["security", "slop", "audit", "vibecleaner"]
+}
