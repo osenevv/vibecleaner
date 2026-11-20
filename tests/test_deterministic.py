@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -25,6 +26,7 @@ from vibeguard.deterministic import (
     detect_silent_exceptions,
     detect_supabase_rls,
     detect_supabase_rls_all,
+    mask_secrets,
     run_deterministic,
     shannon_entropy,
 )
@@ -87,6 +89,17 @@ def _line(text: str, needle: str, occurrence: int = 1) -> int:
 
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _assert_secret_hidden(secret: str, *texts: str | None) -> None:
+    for text in texts:
+        assert text is not None
+        if len(secret) < 4:
+            assert secret not in text
+            continue
+        for index in range(len(secret) - 3):
+            fragment = secret[index : index + 4]
+            assert fragment not in text
 
 
 def test_shannon_entropy_empty_and_varied() -> None:
@@ -165,6 +178,14 @@ def test_walk_repo_tracked_env_included_and_untracked_ignored_env_excluded(tmp_p
     assert ".env.local" not in by_path
     assert ".env.production" not in by_path
     assert "main.py" in by_path
+
+
+def test_walk_repo_skips_vibeguard_outputs(tmp_path: Path) -> None:
+    (tmp_path / "VIBEGUARD_REPORT.md").write_text("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY\n")
+    (tmp_path / ".vibeguard_cache.json").write_text("{}\n")
+    (tmp_path / "vibeguard.sarif").write_text("{}\n")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    assert [item.path for item in walk_repo(tmp_path)] == ["app.py"]
 
 
 def test_walk_repo_outside_git_env_follows_gitignore(tmp_path: Path) -> None:
@@ -459,8 +480,9 @@ def test_env_file_committed_lists_keys_without_values() -> None:
     assert "(+1 more)" in finding.message
     assert secret not in finding.message
     assert finding.snippet is not None
-    assert secret not in finding.snippet
-    assert "supe…" in finding.snippet
+    assert f"<redacted:{len(secret)} chars>" in finding.snippet
+    assert "OPENAI_API_KEY=" in finding.snippet
+    _assert_secret_hidden(secret, finding.snippet, finding.message)
     empty = detect_secrets(_sf(".env", "EMPTY=\n# comment\nQUOTED=\"\"\n"))
     assert empty == []
 
@@ -536,9 +558,8 @@ def test_hardcoded_secret_known_patterns_entropy_and_negatives() -> None:
         assert _line(text, needle) in flagged
         finding = next(item for item in findings if item.line == _line(text, needle))
         assert finding.snippet is not None
-        assert needle not in finding.snippet
-        assert needle[:4] + "…" in finding.snippet
-        assert str(len(needle)) in finding.snippet
+        assert f"<redacted:{len(needle)} chars>" in finding.snippet
+        _assert_secret_hidden(needle, finding.snippet, finding.message)
     assert _line(text, "samples") not in flagged
     assert _line(text, "label =") not in flagged
     assert _line(text, "example_") not in flagged
@@ -801,6 +822,53 @@ def test_god_file_requires_all_three_signals_and_size() -> None:
     assert detect_god_file(_sf("nodb.py", build(http=False, functions=8, pad=520))) == []
 
 
+def _long_module(rows: list[str]) -> str:
+    body = list(rows)
+    for index in range(8):
+        body.extend(
+            [
+                f"def helper_{index}(value):",
+                "    value = value",
+                "    return value",
+                "",
+            ]
+        )
+    body.extend(f"pad_{index} = {index}" for index in range(520))
+    return "\n".join(body) + "\n"
+
+
+def test_god_file_ignores_identifiers_and_string_text() -> None:
+    identifier = _long_module(
+        [
+            "@app.get('/orders')",
+            "def route():",
+            "    return 1",
+            "_UNBOUNDED_SELECT = 1",
+        ]
+    )
+    assert detect_god_file(_sf("identifier.py", identifier)) == []
+
+    strings = _long_module(
+        [
+            'note = "SELECT id FROM users WHERE id = 1"',
+            'pattern = re.compile(r"NextResponse\\.json|Request")',
+            '_UNBOUNDED_SELECT = "UPDATE"',
+        ]
+    )
+    assert detect_god_file(_sf("strings.py", strings)) == []
+
+    real = _long_module(
+        [
+            'query = "SELECT id FROM users WHERE id = %s"',
+            "def handle(request: Request) -> Response:",
+            "    return query",
+        ]
+    )
+    found = detect_god_file(_sf("real.py", real))
+    assert len(found) == 1
+    assert found[0].rule_id == "D6a.god_file"
+
+
 def test_deprecated_sdk_flags_legacy_calls_not_current_apis() -> None:
     legacy = "\n".join(
         [
@@ -950,3 +1018,185 @@ def test_run_deterministic_sorts_and_dedupes_by_file_and_line() -> None:
     assert len(_of(findings, "D1.hardcoded_secret")) == 2
     assert findings[0].line == 1
     assert openai not in (findings[0].snippet or "")
+    _assert_secret_hidden(openai, findings[0].snippet, findings[0].message)
+
+
+def test_walk_repo_rejects_missing_or_file_root(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-root"
+    with pytest.raises(CollectorError) as missing_exc:
+        walk_repo(missing)
+    assert str(missing) in str(missing_exc.value)
+    source = tmp_path / "file.py"
+    source.write_text("x = 1\n")
+    with pytest.raises(CollectorError) as file_exc:
+        walk_repo(source)
+    assert str(source) in str(file_exc.value)
+    with pytest.raises(CollectorError) as collect_exc:
+        collect(missing)
+    assert str(missing) in str(collect_exc.value)
+
+
+def test_deletion_only_hunk_selects_enclosing_route(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    original = "\n".join(
+        [
+            "from fastapi import FastAPI, HTTPException",
+            "app = FastAPI()",
+            "",
+            "@app.post('/orders')",
+            "def create_order():",
+            "    if not session:",
+            "        raise HTTPException(status_code=401)",
+            "    db.execute('insert into orders values (1)')",
+            "    return {'ok': True}",
+            "",
+        ]
+    )
+    (tmp_path / "routes.py").write_text(original)
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "routes.py").write_text(
+        "\n".join(
+            [
+                "from fastapi import FastAPI, HTTPException",
+                "app = FastAPI()",
+                "",
+                "@app.post('/orders')",
+                "def create_order():",
+                "    db.execute('insert into orders values (1)')",
+                "    return {'ok': True}",
+                "",
+            ]
+        )
+    )
+    ctx = collect(tmp_path, "HEAD")
+    routes = [unit for unit in ctx.units if unit.name == "create_order"]
+    assert len(routes) == 1
+    assert routes[0].kind == "route"
+    assert routes[0].http_method == "POST"
+    assert routes[0].route_path == "/orders"
+
+
+def test_snippets_redact_entire_secret_value() -> None:
+    secret = "super" + "secret-value"
+    quoted = detect_secrets(_sf(".env", f'OPENAI_API_KEY="{secret}"\n'))
+    assert quoted[0].snippet is not None
+    assert f"<redacted:{len(secret)} chars>" in quoted[0].snippet
+    _assert_secret_hidden(secret, quoted[0].snippet, quoted[0].message)
+
+    openai = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0"
+    prefixed = f"TOKEN=pre-{openai}\n"
+    prefixed_findings = _of(detect_secrets(_sf("settings.py", prefixed)), "D1.hardcoded_secret")
+    assert len(prefixed_findings) == 1
+    assert prefixed_findings[0].snippet is not None
+    assert "pre-" not in prefixed_findings[0].snippet
+    assert openai[:4] not in prefixed_findings[0].snippet
+    _assert_secret_hidden(openai, prefixed_findings[0].snippet, prefixed_findings[0].message)
+
+    blob = '{"api_key": "pre-' + openai + '"}\n'
+    json_findings = _of(detect_secrets(_sf("config.json", blob)), "D1.hardcoded_secret")
+    assert len(json_findings) == 1
+    assert json_findings[0].snippet is not None
+    assert "pre-" not in json_findings[0].snippet
+    _assert_secret_hidden(openai, json_findings[0].snippet, json_findings[0].message)
+
+    yaml = "api_key: " + openai + "\n"
+    yaml_findings = _of(detect_secrets(_sf("config.yaml", yaml)), "D1.hardcoded_secret")
+    assert len(yaml_findings) == 1
+    assert yaml_findings[0].snippet is not None
+    assert f"<redacted:{len(openai)} chars>" in yaml_findings[0].snippet
+    _assert_secret_hidden(openai, yaml_findings[0].snippet, yaml_findings[0].message)
+
+    logged = f'logger.info("token %s", "{openai}")\n'
+    logged_findings = _of(detect_secrets(_sf("log.py", logged)), "D1.hardcoded_secret")
+    assert len(logged_findings) == 1
+    assert logged_findings[0].snippet is not None
+    assert f"<redacted:{len(openai)} chars>" in logged_findings[0].snippet
+    _assert_secret_hidden(openai, logged_findings[0].snippet, logged_findings[0].message)
+
+    excerpt = "\n".join(
+        [
+            f"    TOKEN={openai}",
+            '    data = {"api_key": "' + secret + '"}',
+            "    note = 'untouched'",
+        ]
+    )
+    masked = mask_secrets(excerpt)
+    assert masked.startswith("    TOKEN=")
+    assert 'note = \'untouched\'' in masked
+    _assert_secret_hidden(openai, masked)
+    _assert_secret_hidden(secret, masked)
+
+
+def test_walk_repo_skips_symlinks(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    outside = tmp_path / "outside.py"
+    outside.write_text("secret = 1\n")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "keep.py").write_text("x = 1\n")
+    (root / "inner.py").write_text("y = 2\n")
+    (root / "link.py").symlink_to(outside)
+    (root / "alias.py").symlink_to(root / "inner.py")
+    (root / "linked").symlink_to(tmp_path, target_is_directory=True)
+    with caplog.at_level(logging.DEBUG, logger="vibeguard"):
+        files = walk_repo(root)
+    assert [item.path for item in files] == ["inner.py", "keep.py"]
+    messages = [record.message for record in caplog.records]
+    assert any("symlink" in message and "link.py" in message for message in messages)
+    assert any("symlink" in message and "alias.py" in message for message in messages)
+    assert all(record.levelno == logging.DEBUG for record in caplog.records if "link.py" in record.message)
+
+
+def test_walk_repo_logs_skipped_files(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    (tmp_path / "big.py").write_bytes(b"a" * (_MB + 1))
+    (tmp_path / "blob.dat").write_bytes(b"\0\x01\x02")
+    (tmp_path / "bad.py").write_bytes(b"\xff\xfe not utf-8\n")
+    (tmp_path / "notes.bin").write_bytes(b"\xff\xfe")
+    with caplog.at_level(logging.DEBUG, logger="vibeguard"):
+        paths = [item.path for item in walk_repo(tmp_path)]
+    assert "big.py" not in paths
+    assert "bad.py" not in paths
+    assert "blob.dat" not in paths
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    debugs = [record for record in caplog.records if record.levelno == logging.DEBUG]
+    assert any("big.py" in record.message and "oversized" in record.message for record in warnings)
+    assert any("bad.py" in record.message and "undecodable" in record.message for record in warnings)
+    assert any("blob.dat" in record.message and "binary" in record.message for record in debugs)
+    assert not any("blob.dat" in record.message for record in warnings)
+    assert any("notes.bin" in record.message for record in debugs)
+    assert not any("notes.bin" in record.message for record in warnings)
+
+
+def test_extract_units_keeps_short_sink_helpers() -> None:
+    python = "\n".join(
+        [
+            "def page_bridge(target, msg): return requests.post(target, json=msg)",
+            "def probe(url):",
+            "    return httpx.get(url)",
+            "def write_log(path, data):",
+            "    open(path, 'w').write(data)",
+            "def read_log(path):",
+            "    return open(path).read()",
+            "def run_query(db):",
+            "    return db.execute('select 1')",
+            "def add(a, b):",
+            "    return a + b",
+        ]
+    )
+    units = extract_units([_sf("bridge.py", python)])
+    by_name = {unit.name: unit for unit in units}
+    assert set(by_name) == {"page_bridge", "probe", "write_log"}
+    assert all(unit.kind == "function" for unit in by_name.values())
+
+    script = "\n".join(
+        [
+            "export function pageBridge(target) { return fetch(target) }",
+            "export const send = (url) => axios.post(url)",
+            "export function save(path, data) { return fs.writeFile(path, data) }",
+            "export function add(a, b) { return a + b }",
+            "function hidden(url) { return fetch(url) }",
+        ]
+    )
+    script_units = extract_units([_sf("bridge.ts", script)])
+    assert {unit.name for unit in script_units} == {"pageBridge", "send", "save"}
+    assert all(unit.kind == "function" for unit in script_units)

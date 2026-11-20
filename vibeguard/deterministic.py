@@ -9,12 +9,18 @@ import re
 from collections import Counter
 from pathlib import PurePosixPath
 
-import tree_sitter_python
-import tree_sitter_typescript
-from tree_sitter import Language as TSLanguage
-from tree_sitter import Node, Parser
+from tree_sitter import Node
 
 from vibeguard.models import Finding, Language, ScanContext, SourceFile
+from vibeguard.ts_parse import attr_leaf as _attr_leaf
+from vibeguard.ts_parse import callee_name as _callee_name
+from vibeguard.ts_parse import decorator_leaf as _decorator_leaf
+from vibeguard.ts_parse import line_text as _line_text
+from vibeguard.ts_parse import node_text as _text
+from vibeguard.ts_parse import parser_for as _parser_for
+from vibeguard.ts_parse import python_string as _python_string
+from vibeguard.ts_parse import script_string as _script_string
+from vibeguard.ts_parse import walk_tree as _walk
 
 __all__ = [
     "detect_cors",
@@ -25,16 +31,10 @@ __all__ = [
     "detect_silent_exceptions",
     "detect_supabase_rls",
     "detect_supabase_rls_all",
+    "mask_secrets",
     "run_deterministic",
     "shannon_entropy",
 ]
-
-_PY_LANGUAGE = TSLanguage(tree_sitter_python.language())
-_TS_LANGUAGE = TSLanguage(tree_sitter_typescript.language_typescript())
-_TSX_LANGUAGE = TSLanguage(tree_sitter_typescript.language_tsx())
-_PY_PARSER = Parser(_PY_LANGUAGE)
-_TS_PARSER = Parser(_TS_LANGUAGE)
-_TSX_PARSER = Parser(_TSX_LANGUAGE)
 
 _CODE_LANGS = frozenset({Language.PYTHON, Language.TYPESCRIPT, Language.TSX, Language.JAVASCRIPT})
 _BROAD_EXCEPTIONS = frozenset({"Exception", "BaseException"})
@@ -100,33 +100,23 @@ _KNOWN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
-_DB_RE = re.compile(
-    "|".join(
-        [
-            "exec" + r"ute\(",
-            "session" + r"\.query",
-            r"\.qu" + r"ery\(",
-            "(?:SEL" + "ECT|INS" + "ERT|UPD" + r"ATE)\s+\S",
-            "supa" + r"base\.from",
-            "pris" + r"ma\.",
-            r"\b" + "db" + r"\.",
-        ]
-    )
+_SQL_STATEMENT = re.compile(
+    r"\bSELECT\b\s+\S[\s\S]{0,800}?\bFROM\b"
+    r"|\bINSERT\s+INTO\b"
+    r"|\bUPDATE\s+(?:\"[^\"]+\"|`[^`]+`|[A-Za-z_][\w$]*)\s+SET\b"
+    r"|\bDELETE\s+FROM\b",
+    re.IGNORECASE,
 )
-_HTTP_RE = re.compile(
-    "|".join(
-        [
-            r"@\w+\.(?:get|post|put|patch|delete|api_route|websocket)\(",
-            r"\b(?:app|router)\.(?:get|post|put|patch|delete|all)\(",
-            "Next" + "Res" + "ponse",
-            r"(?::\s*|->\s*)" + "Re" + r"quest\b",
-            r"(?::\s*|->\s*)(?:Next)?" + "Res" + r"ponse\b",
-            "API" + r"Router\(",
-            "exp" + r"ress\(",
-            r"\b" + "Rou" + r"ter\(",
-        ]
-    )
+_HTTP_DECORATOR_METHODS = frozenset({"get", "post", "put", "patch", "delete", "api_route", "websocket"})
+_HTTP_APP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "all"})
+_HTTP_APP_OBJECTS = frozenset({"app", "router"})
+_HTTP_CTORS = frozenset({"APIRouter", "express", "Router"})
+_HTTP_IMPORTS = frozenset(
+    {"APIRouter", "FastAPI", "express", "Router", "Request", "Response", "NextRequest", "NextResponse"}
 )
+_HTTP_TYPES = frozenset({"Request", "Response", "NextRequest", "NextResponse"})
+_HTTP_IDENTIFIERS = frozenset({"NextRequest", "NextResponse"})
+_ORM_EXECUTE = frozenset({"execute", "executemany"})
 
 _LEGACY_CALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
@@ -306,7 +296,8 @@ def detect_god_file(f: SourceFile) -> list[Finding]:
     nonblank = sum(1 for line in f.text.splitlines() if line.strip())
     if nonblank <= 500:
         return []
-    if _DB_RE.search(f.text) is None or _HTTP_RE.search(f.text) is None:
+    root = _parsed_root(f)
+    if root is None or not _has_sql_signal(root) or not _has_http_signal(root):
         return []
     functions = _count_non_route_functions(f)
     if functions < 8:
@@ -363,7 +354,7 @@ def _env_file_committed(f: SourceFile) -> list[Finding]:
     message = "Committed env file defines " + ", ".join(shown)
     if extra:
         message += f" (+{extra} more)"
-    snippet = _mask_env_line(_line_text(f.text, 1))
+    snippet = _mask_snippet(_line_text(f.text, 1), redact_env=True)
     return [_finding("D1.env_file_committed", f, 1, message, snippet=snippet)]
 
 
@@ -388,7 +379,7 @@ def _next_public(f: SourceFile) -> list[Finding]:
             names.append(name)
     findings: list[Finding] = []
     for line, names in by_line.items():
-        snippet = _mask_quoted(_line_text(f.text, line))
+        snippet = _mask_snippet(_line_text(f.text, line))
         findings.append(
             _finding(
                 "D1.next_public_secret",
@@ -419,7 +410,7 @@ def _hardcoded(f: SourceFile) -> list[Finding]:
     for line, hits in grouped.items():
         kind = next((item_kind for _value, item_kind in hits if item_kind != "high-entropy"), "high-entropy")
         values = [value for value, _item_kind in hits]
-        snippet = _mask_values(_line_text(f.text, line), values)
+        snippet = _mask_snippet(_line_text(f.text, line), values)
         findings.append(_finding("D1.hardcoded_secret", f, line, f"Hardcoded secret ({kind})", snippet=snippet))
     return findings
 
@@ -494,7 +485,9 @@ def _url_without_credentials(value: str) -> bool:
 
 
 def _python_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
-    tree = _PY_PARSER.parse(f.text.encode("utf-8"))
+    root = _parsed_root(f)
+    if root is None:
+        return []
     hits: list[tuple[int, str, str]] = []
 
     def bind(name: str, value_node: Node) -> None:
@@ -532,7 +525,7 @@ def _python_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
         for child in node.named_children:
             walk(child)
 
-    walk(tree.root_node)
+    walk(root)
     return hits
 
 
@@ -735,7 +728,9 @@ def _unquote(token: str) -> str:
 
 
 def _python_cors_lines(f: SourceFile) -> list[int]:
-    tree = _PY_PARSER.parse(f.text.encode("utf-8"))
+    root = _parsed_root(f)
+    if root is None:
+        return []
     lines: list[int] = []
 
     def walk(node: Node) -> None:
@@ -744,7 +739,7 @@ def _python_cors_lines(f: SourceFile) -> list[int]:
         for child in node.named_children:
             walk(child)
 
-    walk(tree.root_node)
+    walk(root)
     return lines
 
 
@@ -1039,8 +1034,10 @@ def _deprecated_python(f: SourceFile) -> list[Finding]:
             findings.append(_finding("D6a.deprecated_sdk", f, index, "Deprecated SDK usage: Pydantic v1 validator"))
             seen.add(index)
     has_model = re.search(r"\bBase" + r"Model\b", f.text) is not None
-    tree = _PY_PARSER.parse(f.text.encode("utf-8"))
-    for line, message in _pydantic_ast(tree.root_node, has_model):
+    root = _parsed_root(f)
+    if root is None:
+        return findings
+    for line, message in _pydantic_ast(root, has_model):
         if line in seen:
             continue
         findings.append(_finding("D6a.deprecated_sdk", f, line, message))
@@ -1331,133 +1328,259 @@ def _is_env_example(path: str) -> bool:
     return PurePosixPath(path).name in _ENV_EXAMPLE_NAMES
 
 
-def _parser_for(source: SourceFile) -> Parser | None:
-    if source.language == Language.PYTHON:
-        return _PY_PARSER
-    if source.language == Language.TSX or source.path.endswith(".jsx"):
-        return _TSX_PARSER
-    if source.language in {Language.TYPESCRIPT, Language.JAVASCRIPT}:
-        return _TS_PARSER
-    return None
+def _parsed_root(source: SourceFile) -> Node | None:
+    parser = _parser_for(source)
+    if parser is None:
+        return None
+    return parser.parse(source.text.encode("utf-8")).root_node
 
 
-def _decorator_leaf(decorator: Node) -> str:
-    inner = decorator.named_children[0] if decorator.named_children else None
-    if inner is None:
-        return ""
-    if inner.type == "call":
-        func = inner.child_by_field_name("function")
-        return _attr_leaf(func) if func is not None else ""
-    return _attr_leaf(inner)
+def _has_sql_signal(root: Node) -> bool:
+    for node in _walk(root):
+        literal = _sql_literal(node)
+        if literal and _SQL_STATEMENT.search(literal):
+            return True
+        if node.type in {"call", "call_expression"} and _call_is_orm(node):
+            return True
+    return False
 
 
-def _attr_leaf(node: Node) -> str:
-    if node.type in {"identifier", "property_identifier"}:
-        return _text(node)
-    if node.type == "attribute":
-        attr = node.child_by_field_name("attribute")
-        return _text(attr) if attr is not None else ""
-    if node.type == "member_expression":
-        prop = node.child_by_field_name("property")
-        return _text(prop) if prop is not None else ""
-    if node.type == "call":
-        func = node.child_by_field_name("function")
-        return _attr_leaf(func) if func is not None else ""
-    if node.type == "call_expression":
-        func = node.child_by_field_name("function")
-        return _attr_leaf(func) if func is not None else ""
-    return ""
+def _sql_literal(node: Node) -> str | None:
+    if node.type == "concatenated_string":
+        parts = [_sql_literal(child) or "" for child in node.named_children]
+        return "".join(parts)
+    if node.type not in {"string", "template_string"}:
+        return None
+    pieces = [
+        _text(child)
+        for child in node.children
+        if child.type in {"string_content", "string_fragment"}
+    ]
+    return "".join(pieces)
+
+
+def _call_is_orm(call: Node) -> bool:
+    func = call.child_by_field_name("function")
+    if func is None:
+        return False
+    parts = [part for part in _callee_name(func).split(".") if part]
+    if not parts:
+        return False
+    leaf = parts[-1]
+    if leaf in _ORM_EXECUTE:
+        return True
+    if leaf == "query" and len(parts) >= 2:
+        return True
+    if "db" in parts or "prisma" in parts:
+        return True
+    return "supabase" in parts and any(part.startswith("from") for part in parts)
+
+
+def _has_http_signal(root: Node) -> bool:
+    for node in _walk(root):
+        if _http_node(node):
+            return True
+    return False
+
+
+def _http_node(node: Node) -> bool:
+    if node.type in {"type", "type_annotation"}:
+        return _type_mentions_http(node)
+    if node.type == "decorator":
+        return _decorator_is_http(node)
+    if node.type in {"call", "call_expression"}:
+        return _call_is_http(node)
+    if node.type in {"import_statement", "import_from_statement", "import_specifier", "import_clause"}:
+        return bool(_HTTP_IMPORTS.intersection(_import_names(node)))
+    return node.type in {"identifier", "property_identifier"} and _text(node) in _HTTP_IDENTIFIERS
+
+
+def _type_mentions_http(node: Node) -> bool:
+    for child in _walk(node):
+        if child.type in {"identifier", "property_identifier"} and _text(child) in _HTTP_TYPES:
+            return True
+    return False
+
+
+def _decorator_is_http(node: Node) -> bool:
+    if _decorator_leaf(node).lower() not in _HTTP_DECORATOR_METHODS:
+        return False
+    inner = node.named_children[0] if node.named_children else None
+    return inner is not None and inner.type in {"call", "call_expression"}
+
+
+def _call_is_http(call: Node) -> bool:
+    func = call.child_by_field_name("function")
+    if func is None:
+        return False
+    parts = [part for part in _callee_name(func).split(".") if part]
+    if not parts:
+        return False
+    leaf = parts[-1]
+    if leaf in _HTTP_CTORS:
+        return True
+    return len(parts) >= 2 and parts[-2] in _HTTP_APP_OBJECTS and leaf.lower() in _HTTP_APP_METHODS
+
+
+def _import_names(node: Node) -> list[str]:
+    names: list[str] = []
+    if node.type == "import_from_statement":
+        dotted = [child for child in node.named_children if child.type == "dotted_name"]
+        names.extend(_text(item).split(".")[-1] for item in dotted[1:])
+    elif node.type == "import_statement":
+        for child in node.named_children:
+            if child.type == "dotted_name":
+                names.append(_text(child).split(".")[-1])
+            elif child.type == "aliased_import" and child.named_children:
+                names.append(_text(child.named_children[0]).split(".")[-1])
+    elif node.type == "import_specifier":
+        ident = next((child for child in node.named_children if child.type == "identifier"), None)
+        if ident is not None:
+            names.append(_text(ident))
+    elif node.type == "import_clause":
+        ident = next((child for child in node.named_children if child.type == "identifier"), None)
+        if ident is not None:
+            names.append(_text(ident))
+    for child in node.named_children:
+        if child.type == "aliased_import" and child.named_children:
+            names.append(_text(child.named_children[0]).split(".")[-1])
+    return names
 
 
 def _dotted(node: Node) -> str:
     if node.type == "identifier":
         return _text(node)
-    if node.type == "attribute":
-        obj = node.child_by_field_name("object")
-        attr = node.child_by_field_name("attribute")
-        if obj is None or attr is None:
-            return ""
-        return _dotted(obj) + "." + _text(attr)
-    return ""
+    if node.type != "attribute":
+        return ""
+    obj = node.child_by_field_name("object")
+    attr = node.child_by_field_name("attribute")
+    if obj is None or attr is None:
+        return ""
+    return _dotted(obj) + "." + _text(attr)
 
 
-def _walk(node: Node) -> list[Node]:
-    nodes: list[Node] = []
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        nodes.append(current)
-        stack.extend(reversed(current.named_children))
-    return nodes
+_ENV_ASSIGN = re.compile(
+    r"^(?P<export>(?:export\s+)?)(?P<key>[A-Za-z_][\w]*)(?P<eq>\s*=\s*)(?P<raw>.*)$"
+)
+_ASSIGN_VALUE = re.compile(
+    r"""(?P<head>(?:["'][A-Za-z_][\w.-]*["']|[A-Za-z_][\w.-]*)\s*[:=]\s*)"""
+    r"""(?P<val>"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^ \t,;#()\[\]{}"']+)"""
+)
 
 
-def _text(node: Node) -> str:
-    raw = node.text
-    if isinstance(raw, bytes):
-        return raw.decode("utf-8", errors="replace")
-    return str(raw)
+def mask_secrets(text: str, secrets: list[str] | None = None) -> str:
+    """Replace secret values with ``<redacted:N chars>``."""
+    if "\n" not in text:
+        return _mask_snippet(text, secrets)
+    return "\n".join(_mask_snippet(line, secrets) for line in text.split("\n"))
 
 
-def _python_string(node: Node) -> str | None:
-    if node.type != "string" or any(child.type == "interpolation" for child in node.children):
+def _redact(value: str) -> str:
+    return f"<redacted:{len(value)} chars>"
+
+
+def _mask_snippet(line: str, secrets: list[str] | None = None, *, redact_env: bool = False) -> str:
+    values = [item for item in (secrets or []) if item]
+    stripped = line.strip()
+    if not stripped:
+        return line
+    indent = line[: len(line) - len(line.lstrip())]
+    tail = line[len(line.rstrip()) :]
+    masked = _mask_assignments(stripped, values, redact_env=redact_env)
+    masked = _mask_exact(masked, values)
+    return indent + _mask_known_patterns(masked) + tail
+
+
+def _mask_assignments(line: str, secrets: list[str], *, redact_env: bool) -> str:
+    match = _ENV_ASSIGN.match(line)
+    if match is not None:
+        literal = _literal_token(match.group("raw").strip())
+        if literal is not None:
+            inner, quote = literal
+            tight = match.group("eq") == "="
+            if inner and not inner.startswith("<redacted:") and (
+                redact_env or tight or _assignment_is_secret(match.group("key"), inner, secrets)
+            ):
+                shown = _redact(inner)
+                if quote:
+                    shown = quote + shown + quote
+                return f"{match.group('export')}{match.group('key')}{match.group('eq')}{shown}"
+
+    def replace(found: re.Match[str]) -> str:
+        raw = found.group("val")
+        inner, quote = _unwrap_literal(raw)
+        if not inner or inner.startswith("<redacted:"):
+            return found.group(0)
+        key = re.split(r"\s*[:=]", found.group("head"), maxsplit=1)[0].strip("'\"")
+        if not _assignment_is_secret(key, inner, secrets):
+            return found.group(0)
+        shown = _redact(inner)
+        if quote:
+            shown = quote + shown + quote
+        return found.group("head") + shown
+
+    return _ASSIGN_VALUE.sub(replace, line)
+
+
+def _literal_token(raw: str) -> tuple[str, str] | None:
+    if not raw or raw.startswith("#"):
         return None
-    return "".join(_text(child) for child in node.children if child.type == "string_content")
-
-
-def _script_string(node: Node) -> str | None:
-    if node.type == "string":
-        if any(child.is_named and child.type != "string_fragment" for child in node.children):
-            return None
-        return "".join(_text(child) for child in node.children if child.type == "string_fragment")
-    if node.type == "template_string":
-        if any(child.type == "template_substitution" for child in node.children):
-            return None
-        return "".join(_text(child) for child in node.children if child.type == "string_fragment")
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"', "`"}:
+        return raw[1:-1], raw[0]
+    if re.fullmatch(r"[^\s#()]+", raw):
+        return raw, ""
     return None
 
 
-def _line_text(text: str, line: int) -> str:
-    rows = text.splitlines()
-    if 1 <= line <= len(rows):
-        return rows[line - 1].strip()
-    return ""
+def _unwrap_literal(raw: str) -> tuple[str, str]:
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"', "`"}:
+        return raw[1:-1], raw[0]
+    return raw, ""
 
 
-def _mask(value: str) -> str:
-    return f"{value[:4]}…{len(value)}"
+def _assignment_is_secret(key: str, value: str, secrets: list[str]) -> bool:
+    if any(item and item in value for item in secrets):
+        return True
+    if any(pattern.search(value) for _kind, pattern in _KNOWN_PATTERNS):
+        return True
+    if _SENSITIVE_NAME.search(key) is None or len(value) < 4:
+        return False
+    if any(word in value.lower() for word in _PLACEHOLDER_WORDS):
+        return False
+    return re.fullmatch(r"[^\s(){}\[\]]+", value) is not None
 
 
-def _mask_values(line: str, values: list[str]) -> str:
+def _mask_exact(line: str, secrets: list[str]) -> str:
     masked = line
-    for value in sorted({item for item in values if item}, key=len, reverse=True):
-        if value in masked:
-            masked = masked.replace(value, _mask(value))
+    for value in sorted(set(secrets), key=len, reverse=True):
+        if value and value in masked:
+            masked = masked.replace(value, _redact(value))
     return masked
 
 
-def _mask_quoted(line: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        inner = match.group(2)
-        if len(inner) < 6:
-            return match.group(0)
-        return match.group(1) + _mask(inner) + match.group(1)
-
-    return re.sub(r"(['\"])([^'\"]+)\1", replace, line)
-
-
-def _mask_env_line(line: str) -> str:
-    match = re.match(r"^(\s*(?:export\s+)?[A-Za-z_][\w]*\s*=\s*)(.*)$", line.strip())
-    if match is None:
-        return line.strip()
-    prefix, raw = match.group(1), match.group(2).strip()
-    if not raw or raw.startswith("#"):
-        return line.strip()
-    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
-        inner = raw[1:-1]
-        if not inner:
-            return line.strip()
-        return prefix + raw[0] + _mask(inner) + raw[0]
-    return prefix + _mask(raw)
+def _mask_known_patterns(line: str) -> str:
+    spans: list[tuple[int, int]] = []
+    for _kind, pattern in _KNOWN_PATTERNS:
+        spans.extend((match.start(), match.end()) for match in pattern.finditer(line))
+    if not spans:
+        return line
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans, key=lambda item: (item[0], -(item[1] - item[0]))):
+        if merged and start < merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1] = (merged[-1][0], end)
+            continue
+        merged.append((start, end))
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in merged:
+        if start < cursor:
+            continue
+        pieces.append(line[cursor:start])
+        pieces.append(_redact(line[start:end]))
+        cursor = end
+    pieces.append(line[cursor:])
+    return "".join(pieces)
 
 
 def _finding(

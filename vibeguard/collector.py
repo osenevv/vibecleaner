@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import stat
 import subprocess
 import warnings
 from pathlib import Path, PurePosixPath
-from typing import Iterator
 
 import pathspec
-import tree_sitter_python
-import tree_sitter_typescript
-from tree_sitter import Language as TSLanguage
-from tree_sitter import Node, Parser
+from tree_sitter import Node
 
 from vibeguard.models import CodeUnit, Language, ScanContext, SourceFile
+from vibeguard.ts_parse import callee_name as _callee_name
+from vibeguard.ts_parse import decorator_leaf as _decorator_leaf
+from vibeguard.ts_parse import line_text as _line_text
+from vibeguard.ts_parse import node_text as _text
+from vibeguard.ts_parse import parser_for as _parser_for
+from vibeguard.ts_parse import python_string as _python_string
+from vibeguard.ts_parse import script_string as _script_string
+from vibeguard.ts_parse import walk_tree as _walk
 
 __all__ = [
     "CollectorError",
@@ -47,8 +52,11 @@ _SKIP_DIRS = frozenset(
         "site-packages",
     }
 )
-_LOCKFILES = frozenset(
+_SKIPPED_FILES = frozenset(
     {
+        "VIBEGUARD_REPORT.md",
+        ".vibeguard_cache.json",
+        "vibeguard.sarif",
         "package-lock.json",
         "yarn.lock",
         "pnpm-lock.yaml",
@@ -131,13 +139,24 @@ _MW_CALLS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("auth", re.compile(r"\bauth\s*\(")),
 )
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_SOURCE_SUFFIXES = frozenset(_EXT_LANGUAGE) | frozenset({".pyi", ".pyw"})
+_PROCESS_EXEC = frozenset(
+    {
+        "execFile",
+        "execFileSync",
+        "execSync",
+        "execv",
+        "execl",
+        "execve",
+        "execvp",
+        "execlp",
+        "execvpe",
+    }
+)
+_EXEC_OWNERS = frozenset({"child_process", "cp", "os", "process"})
+_WRITE_MODE = frozenset({"w", "a", "x"})
 
-_PY_LANGUAGE = TSLanguage(tree_sitter_python.language())
-_TS_LANGUAGE = TSLanguage(tree_sitter_typescript.language_typescript())
-_TSX_LANGUAGE = TSLanguage(tree_sitter_typescript.language_tsx())
-_PY_PARSER = Parser(_PY_LANGUAGE)
-_TS_PARSER = Parser(_TS_LANGUAGE)
-_TSX_PARSER = Parser(_TSX_LANGUAGE)
+log = logging.getLogger("vibeguard")
 
 
 class CollectorError(Exception):
@@ -146,9 +165,10 @@ class CollectorError(Exception):
 
 def walk_repo(root: Path) -> list[SourceFile]:
     """Return scannable text files under ``root``, repo-relative and sorted."""
-    root = Path(root).resolve()
-    if not root.is_dir():
-        return []
+    given = Path(root)
+    if not given.is_dir():
+        raise CollectorError(f"{given} is not a directory")
+    root = given.resolve()
     specs = _ignore_specs(root)
     tracked_env = _tracked_env_files(root)
     found: list[SourceFile] = []
@@ -160,6 +180,8 @@ def walk_repo(root: Path) -> list[SourceFile]:
             if name in _SKIP_DIRS:
                 continue
             rel = name if rel_dir == Path(".") else (rel_dir / name).as_posix()
+            if _skip_dir(root, current / name, rel):
+                continue
             if _is_ignored(specs, rel, is_dir=True):
                 continue
             kept_dirs.append(name)
@@ -336,7 +358,7 @@ def _consider_file(
     specs: list[pathspec.PathSpec],
     tracked_env: set[str] | None,
 ) -> SourceFile | None:
-    if name in _LOCKFILES or name.lower().endswith(".min.js"):
+    if name in _SKIPPED_FILES or name.lower().endswith(".min.js"):
         return None
     rel = name if rel_dir == Path(".") else (rel_dir / name).as_posix()
     language = _language_for(Path(name))
@@ -348,20 +370,38 @@ def _consider_file(
         return None
     abs_path = current / name
     try:
-        info = abs_path.stat()
-    except OSError:
+        info = abs_path.lstat()
+    except OSError as exc:
+        log.debug("skipping %s (%s)", rel, exc)
         return None
-    if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_BYTES:
+    if stat.S_ISLNK(info.st_mode):
+        log.debug("skipping symlink %s", rel)
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    if info.st_size > _MAX_BYTES:
+        _log_skip(rel, "oversized")
+        return None
+    try:
+        resolved = abs_path.resolve()
+    except OSError as exc:
+        log.debug("skipping %s (%s)", rel, exc)
+        return None
+    if not _within_root(root, resolved):
+        log.debug("skipping %s (resolves outside scan root)", rel)
         return None
     try:
         data = abs_path.read_bytes()
-    except OSError:
+    except OSError as exc:
+        log.debug("skipping %s (%s)", rel, exc)
         return None
     if b"\0" in data[:_BINARY_PROBE]:
+        _log_skip(rel, "binary")
         return None
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
+        _log_skip(rel, "undecodable")
         return None
     return SourceFile(path=rel, abs_path=abs_path, language=language, text=text)
 
@@ -449,7 +489,11 @@ def _parse_unified_diff(diff_text: str) -> dict[str, set[int]]:
                 continue
             start = int(match.group(1))
             count = int(match.group(2)) if match.group(2) is not None else 1
-            if count > 0 and start > 0:
+            if count == 0:
+                for line_no in (max(start, 1), start + 1):
+                    if line_no > 0:
+                        parsed[current].add(line_no)
+            elif count > 0 and start > 0:
                 parsed[current].update(range(start, start + count))
     return parsed
 
@@ -655,13 +699,6 @@ def _oneline(text: str, limit: int = 500) -> str:
     return collapsed[: limit - 1] + "…"
 
 
-def _line_text(text: str, line: int) -> str:
-    rows = text.splitlines()
-    if 1 <= line <= len(rows):
-        return rows[line - 1].strip()
-    return ""
-
-
 def _cap_text(text: str, limit: int, note: str) -> str:
     if len(text) <= limit:
         return text
@@ -683,18 +720,11 @@ def _is_test_unit_path(path: str) -> bool:
     return re.search(r"\.(test|spec)\.(tsx|ts|jsx|js|mjs|cjs)$", name) is not None
 
 
-def _parser_for(source: SourceFile) -> Parser | None:
-    if source.language == Language.PYTHON:
-        return _PY_PARSER
-    if source.language == Language.TSX or source.path.endswith(".jsx"):
-        return _TSX_PARSER
-    if source.language in {Language.TYPESCRIPT, Language.JAVASCRIPT}:
-        return _TS_PARSER
-    return None
-
-
 def _extract_python(source: SourceFile) -> list[CodeUnit]:
-    tree = _PY_PARSER.parse(source.text.encode("utf-8"))
+    parser = _parser_for(source)
+    if parser is None:
+        return []
+    tree = parser.parse(source.text.encode("utf-8"))
     units: list[CodeUnit] = []
     _visit_python(tree.root_node, source, units)
     return units
@@ -726,6 +756,8 @@ def _python_function_unit(source: SourceFile, span_node: Node, func: Node) -> Co
     if route is not None:
         method, route_path = route
         return _make_unit(source, span_node, name=name, kind="route", http_method=method, route_path=route_path)
+    if _calls_sink(func):
+        return _make_unit(source, span_node, name=name, kind="function")
     if _body_lines(func) < _MIN_BODY_LINES:
         return None
     start, end = _span(span_node)
@@ -752,25 +784,6 @@ def _python_route(decorated: Node) -> tuple[str, str | None] | None:
     if saw_tool:
         return "TOOL", None
     return None
-
-
-def _decorator_leaf(decorator: Node) -> str:
-    inner = decorator.named_children[0] if decorator.named_children else None
-    if inner is None:
-        return ""
-    if inner.type == "call":
-        func = inner.child_by_field_name("function")
-        return _attr_leaf(func) if func is not None else ""
-    return _attr_leaf(inner)
-
-
-def _attr_leaf(node: Node) -> str:
-    if node.type == "identifier":
-        return _text(node)
-    if node.type == "attribute":
-        attr = node.child_by_field_name("attribute")
-        return _text(attr) if attr is not None else ""
-    return ""
 
 
 def _first_string_arg(call: Node) -> str | None:
@@ -822,12 +835,13 @@ def _units_from_export(
         return [_make_unit(source, node, name=name, kind="route", http_method=name, route_path=app_path)]
     if use_server and is_async and name:
         return [_make_unit(source, node, name=name, kind="route", http_method="ACTION")]
-    if not name or _body_lines(func) < _MIN_BODY_LINES:
+    if not name:
         return []
     start, end = _span(node)
-    if not _mentions_io(_slice(source.text, start, end)):
-        return []
-    return [_make_unit(source, node, name=name, kind="function")]
+    body = _slice(source.text, start, end)
+    if _calls_sink(func) or (_body_lines(func) >= _MIN_BODY_LINES and _mentions_io(body)):
+        return [_make_unit(source, node, name=name, kind="function")]
+    return []
 
 
 def _export_target(node: Node) -> tuple[str | None, Node, bool, bool] | None:
@@ -941,6 +955,90 @@ def _mentions_io(source: str) -> bool:
     return any(needle in source for needle in _IO_NEEDLES)
 
 
+def _calls_sink(func: Node) -> bool:
+    for node in _walk(func):
+        if node.type not in {"call", "call_expression"}:
+            continue
+        callee = node.child_by_field_name("function")
+        if callee is None:
+            continue
+        if _callee_is_sink(callee) or _open_writes(node, callee):
+            return True
+    return False
+
+
+def _callee_is_sink(callee: Node) -> bool:
+    parts = [part for part in _callee_name(callee).split(".") if part]
+    if not parts:
+        return False
+    leaf = parts[-1]
+    if _dotted_owner(parts, "requests") or _dotted_owner(parts, "httpx"):
+        return True
+    if any(part == "aiohttp" for part in parts):
+        return True
+    if leaf == "fetch" or any(part == "axios" for part in parts):
+        return True
+    if any(part == "urllib" or part.startswith("urllib") for part in parts):
+        return True
+    if any(part == "subprocess" for part in parts):
+        return True
+    if _is_os_system(parts) or _is_process_exec(parts) or leaf in {"spawn", "spawnSync"}:
+        return True
+    return "fs" in parts[:-1] and leaf.startswith("writeFile")
+
+
+def _dotted_owner(parts: list[str], name: str) -> bool:
+    return len(parts) >= 2 and name in parts[:-1]
+
+
+def _is_os_system(parts: list[str]) -> bool:
+    return len(parts) >= 2 and parts[-2] == "os" and parts[-1] == "system"
+
+
+def _is_process_exec(parts: list[str]) -> bool:
+    leaf = parts[-1]
+    if leaf in _PROCESS_EXEC:
+        return True
+    if leaf.startswith("execut"):
+        return False
+    if leaf == "exec":
+        return len(parts) == 1 or parts[-2] in _EXEC_OWNERS
+    return len(parts) >= 2 and parts[-2] == "os" and leaf.startswith("exec")
+
+
+def _open_writes(call: Node, callee: Node) -> bool:
+    parts = [part for part in _callee_name(callee).split(".") if part]
+    if not parts or parts[-1] != "open":
+        return False
+    mode = _open_mode(call)
+    return mode is not None and mode[:1] in _WRITE_MODE
+
+
+def _open_mode(call: Node) -> str | None:
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    positional: list[Node] = []
+    for child in args.named_children:
+        if child.type != "keyword_argument":
+            positional.append(child)
+            continue
+        key = child.child_by_field_name("name")
+        value = child.child_by_field_name("value")
+        if key is not None and value is not None and _text(key) == "mode":
+            return _literal_text(value)
+    if len(positional) >= 2:
+        return _literal_text(positional[1])
+    return None
+
+
+def _literal_text(node: Node) -> str | None:
+    python = _python_string(node)
+    if python:
+        return python
+    return _script_string(node)
+
+
 def _body_lines(node: Node) -> int:
     body = node.child_by_field_name("body")
     if body is None:
@@ -1033,34 +1131,37 @@ def _overlaps(left: CodeUnit, right: CodeUnit) -> bool:
     return left.file == right.file and left.start_line <= right.end_line and right.start_line <= left.end_line
 
 
-def _walk(node: Node) -> Iterator[Node]:
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        yield current
-        stack.extend(reversed(current.named_children))
+def _skip_dir(root: Path, path: Path, rel: str) -> bool:
+    if path.is_symlink():
+        log.debug("skipping symlink %s", rel)
+        return True
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        log.debug("skipping %s (%s)", rel, exc)
+        return True
+    if not _within_root(root, resolved):
+        log.debug("skipping %s (resolves outside scan root)", rel)
+        return True
+    return False
 
 
-def _text(node: Node) -> str:
-    raw = node.text
-    if isinstance(raw, bytes):
-        return raw.decode("utf-8", errors="replace")
-    return str(raw)
+def _within_root(root: Path, path: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
-def _python_string(node: Node) -> str | None:
-    if node.type != "string" or any(child.type == "interpolation" for child in node.children):
-        return None
-    return "".join(_text(child) for child in node.children if child.type == "string_content")
+def _source_like(path: str) -> bool:
+    pure = PurePosixPath(path)
+    if pure.suffix.lower() in _SOURCE_SUFFIXES:
+        return True
+    name = pure.name
+    return name == ".env" or name.startswith(".env.")
 
 
-def _script_string(node: Node) -> str | None:
-    if node.type == "string":
-        if any(child.is_named and child.type != "string_fragment" for child in node.children):
-            return None
-        return "".join(_text(child) for child in node.children if child.type == "string_fragment")
-    if node.type == "template_string":
-        if any(child.type == "template_substitution" for child in node.children):
-            return None
-        return "".join(_text(child) for child in node.children if child.type == "string_fragment")
-    return None
+def _log_skip(path: str, reason: str) -> None:
+    level = logging.WARNING if _source_like(path) else logging.DEBUG
+    log.log(level, "skipping %s (%s)", path, reason)
