@@ -1,0 +1,137 @@
+{
+  "cases": {
+    "positive/p01_dotenv_secrets": {
+      "expected": ["D1"],
+      "why": "A committed .env contains an OpenAI-style key, a Supabase service_role JWT, and a high-entropy INTERNAL_API_SECRET. The Python loader only reads the environment."
+    },
+    "positive/p02_source_secrets": {
+      "expected": ["D1"],
+      "why": "NEXT_PUBLIC_OPENAI_API_KEY and NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY are shipped to the browser, and server/secrets.py hardcodes an API key plus INTERNAL_API_SECRET."
+    },
+    "positive/p03_migration_rls_gaps": {
+      "expected": ["D2"],
+      "why": "orders and invoices are created with no ENABLE ROW LEVEL SECURITY. profiles enables RLS and never gets a CREATE POLICY."
+    },
+    "positive/p04_cors_wildcard_credentials": {
+      "expected": ["D2"],
+      "why": "CORSMiddleware uses allow_origins=[\"*\"] together with allow_credentials=True. The mutating route still requires a session and a Pydantic body."
+    },
+    "positive/p05_unauth_refund": {
+      "expected": ["D3"],
+      "why": "POST /refunds inserts a refund with no auth dependency. The amount comes from the stored order and the body is a Pydantic model."
+    },
+    "positive/p06_unauth_invite": {
+      "expected": ["D3"],
+      "why": "POST /api/invites inserts a row with no middleware and no session check. Zod validates the body, which has no identity or price field."
+    },
+    "positive/p07_idor_body_user": {
+      "expected": ["D4"],
+      "why": "The payout route is behind a router auth dependency, but credit_wallet is called with user_id taken from the JSON body."
+    },
+    "positive/p08_client_price_checkout": {
+      "expected": ["D4"],
+      "why": "Checkout authenticates the session and validates with Zod, then creates a Stripe charge for amountCents supplied by the client."
+    },
+    "positive/p09_system_prompt_concat": {
+      "expected": ["D5"],
+      "why": "The support handler concatenates the customer message into the system prompt. The route is authenticated and the body is a Pydantic model."
+    },
+    "positive/p10_unbounded_shell_tool": {
+      "expected": ["D5"],
+      "why": "After a session check and a Zod parse, the handler runs the user message through bash -lc with no allow-list or approval."
+    },
+    "positive/p11_silent_exception": {
+      "expected": ["D6a"],
+      "why": "The Python receipt route uses except Exception: pass around email delivery, and the TypeScript route uses an empty catch. The insert itself is real and authenticated."
+    },
+    "positive/p12_god_billing_module": {
+      "expected": ["D6a"],
+      "why": "billing_api.py is one module over 500 non-blank lines mixing FastAPI routes, SQL, and pricing rules. Auth, Pydantic bodies, and server-side prices are in place."
+    },
+    "positive/p13_stubbed_shipping_quote": {
+      "expected": ["D6b"],
+      "why": "The shipping quote route is authenticated and Zod-validated, then returns a TODO stub with a hardcoded mock price."
+    },
+    "positive/p14_n_plus_one_orders": {
+      "expected": ["D7a"],
+      "why": "Each order issues its own buyer SELECT inside a for-loop. The route is authenticated and the order list itself is LIMITed."
+    },
+    "positive/p15_raw_json_body": {
+      "expected": ["D7b"],
+      "why": "The notes handler checks the session, then reads title and body from an unvalidated req.json() value with no Zod schema."
+    },
+    "negative/n01_router_level_auth": {
+      "expected": [],
+      "why": "The mutating order route relies on APIRouter(dependencies=[Depends(get_current_user)]) and does not repeat that dependency on the handler. Price comes from the catalog."
+    },
+    "negative/n02_middleware_matcher": {
+      "expected": [],
+      "why": "middleware.ts matcher covers /api/:path* and rejects a missing or bad session. The project route writes with Zod and has no local auth check."
+    },
+    "negative/n03_logged_value_error": {
+      "expected": [],
+      "why": "Quantity parsing catches ValueError, logs a warning, and returns 400. The handler is authenticated and the body is a Pydantic model."
+    },
+    "negative/n04_catch_log_rethrow": {
+      "expected": [],
+      "why": "The notification handler logs the caught error and rethrows it. A session check and a Zod schema are present."
+    },
+    "negative/n05_publishable_keys": {
+      "expected": [],
+      "why": "NEXT_PUBLIC_SUPABASE_ANON_KEY is a JWT whose role is anon, and the Stripe value is a pk_test publishable key."
+    },
+    "negative/n06_env_example": {
+      "expected": [],
+      "why": ".env.example holds only placeholder values. The settings loader reads the process environment and contains no secret literals."
+    },
+    "negative/n07_rls_later_migration": {
+      "expected": [],
+      "why": "The init migration creates the tables. 20240102 enables row level security and adds select, insert, update, and delete policies."
+    },
+    "negative/n08_cors_allowlist": {
+      "expected": [],
+      "why": "CORS allows an explicit origin list with credentials. The widget route requires a session and a Pydantic body."
+    },
+    "negative/n09_session_owner_check": {
+      "expected": [],
+      "why": "The note's user_id is loaded from the database and compared to the session user before the update."
+    },
+    "negative/n10_server_price_lookup": {
+      "expected": [],
+      "why": "Checkout accepts an unused amount_cents field but charges product.price_cents times quantity from the catalog."
+    },
+    "negative/n11_guarded_agent": {
+      "expected": [],
+      "why": "User text stays in the user role. Tool name must be on an allow-list, arguments are a Pydantic model, and the tools are read-only and owner-scoped."
+    },
+    "negative/n12_batched_pagination": {
+      "expected": [],
+      "why": "Orders load through a bounded ANY query with LIMIT/OFFSET. The TypeScript helper pages with .range and uses Promise.all over at most 25 ids."
+    },
+    "negative/n13_schema_validated_body": {
+      "expected": [],
+      "why": "request.json() and req.json() are passed through Pydantic model_validate and Zod parse before any field is stored. Both routes require a session."
+    },
+    "negative/n14_config_enums_and_tests": {
+      "expected": [],
+      "why": "Plan prices and invoice statuses are static configuration. Mock invoices live under tests/. The UUID and SHA-256 are public constants, not credentials."
+    },
+    "negative/n15_cohesive_rate_table": {
+      "expected": [],
+      "why": "rate_table.py is long but only computes a parcel quote from its arguments. It does not mix in HTTP handlers or database access."
+    }
+  },
+  "_meta": {
+    "schema_version": 1,
+    "granularity": "case",
+    "case_key": "<positive|negative>/<directory name> relative to benchmarks/",
+    "entry_shape": {"expected": ["D1"], "why": "short rationale"},
+    "detector_ids": ["D1", "D2", "D3", "D4", "D5", "D6a", "D6b", "D7a", "D7b"],
+    "layers": {
+      "1": ["D1", "D2", "D6a"],
+      "2": ["D3", "D4", "D5", "D6b", "D7a", "D7b"]
+    },
+    "scoring": "A case is a set of detector ids. True positive, false positive, and false negative counts are computed per (case, detector) pair against expected. Negatives use an empty expected set.",
+    "sweep": "Layer-1 findings have probability null and always count. Layer-2 findings count when probability is greater than or equal to the threshold."
+  }
+}
