@@ -1,4 +1,8 @@
-"""Score VibeGuard benchmark cases against benchmarks/labels.json."""
+"""Score VibeGuard benchmark cases against a labels file.
+
+Defaults to benchmarks/labels.json and loads case directories from that file's
+parent. ``--labels benchmarks/holdout_labels.json`` loads benchmarks/holdout.
+"""
 
 from __future__ import annotations
 
@@ -139,15 +143,31 @@ def percentile(values: Sequence[float], fraction: float) -> float:
     return ordered[low] * (1 - weight) + ordered[high] * weight
 
 
-def load_cases(benchmarks: Path) -> list[CaseSpec]:
-    payload = json.loads((benchmarks / "labels.json").read_text(encoding="utf-8"))
+def case_root_for(labels_path: Path) -> Path:
+    """Directory that contains ``positive/`` and ``negative/``.
+
+    ``labels.json`` keeps cases in its parent. A ``<name>_labels.json`` file
+    keeps them in the sibling ``<name>/`` directory, so
+    ``benchmarks/holdout_labels.json`` resolves to ``benchmarks/holdout``.
+    """
+    marker = "_labels.json"
+    name = labels_path.name
+    if name.endswith(marker):
+        return labels_path.parent / name[: -len(marker)]
+    return labels_path.parent
+
+
+def load_cases(labels_path: Path) -> list[CaseSpec]:
+    payload = json.loads(labels_path.read_text(encoding="utf-8"))
+    root = case_root_for(labels_path)
+    label_name = labels_path.name
     raw_cases = payload.get("cases")
     if not isinstance(raw_cases, dict):
-        raise RuntimeError("labels.json is missing a cases object")
+        raise RuntimeError(f"{label_name} is missing a cases object")
     specs: list[CaseSpec] = []
     found: set[str] = set()
     for kind in ("positive", "negative"):
-        folder = benchmarks / kind
+        folder = root / kind
         if not folder.is_dir():
             raise RuntimeError(f"missing benchmark directory {folder}")
         for path in sorted(item for item in folder.iterdir() if item.is_dir()):
@@ -155,7 +175,7 @@ def load_cases(benchmarks: Path) -> list[CaseSpec]:
             found.add(case_id)
             entry = raw_cases.get(case_id)
             if not isinstance(entry, dict) or "expected" not in entry:
-                raise RuntimeError(f"labels.json has no expected list for {case_id}")
+                raise RuntimeError(f"{label_name} has no expected list for {case_id}")
             expected_raw = entry["expected"]
             if not isinstance(expected_raw, list) or not all(isinstance(item, str) for item in expected_raw):
                 raise RuntimeError(f"{case_id} expected must be a list of detector ids")
@@ -174,7 +194,7 @@ def load_cases(benchmarks: Path) -> list[CaseSpec]:
     extra = sorted(set(raw_cases).difference(found))
     missing = sorted(found.difference(raw_cases))
     if extra or missing:
-        raise RuntimeError(f"labels.json does not match case directories extra={extra} missing={missing}")
+        raise RuntimeError(f"{label_name} does not match case directories extra={extra} missing={missing}")
     return specs
 
 
@@ -614,6 +634,15 @@ def emit_console(report: EvalReport) -> None:
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Score VibeGuard against the benchmark cases.")
+    parser.add_argument(
+        "--labels",
+        default=str(BENCHMARKS / "labels.json"),
+        help=(
+            "Labels JSON file (default: benchmarks/labels.json). "
+            "Case directories resolve under the file's parent. "
+            "A <name>_labels.json file resolves under the sibling <name>/ directory."
+        ),
+    )
     parser.add_argument("--mode", choices=("auto", "live", "offline", "off"), default="auto")
     parser.add_argument("--threshold", type=float, default=0.75)
     parser.add_argument("--sweep", default=None, help="Comma-separated thresholds, lowest is scanned once.")
@@ -665,7 +694,10 @@ def run(argv: Sequence[str] | None = None) -> EvalReport:
     else:
         sweep = None
         scan_threshold = args.threshold
-    cases = select_cases(load_cases(BENCHMARKS), args.cases)
+    labels_path = Path(args.labels)
+    if not labels_path.is_absolute():
+        labels_path = REPO_ROOT / labels_path
+    cases = select_cases(load_cases(labels_path), args.cases)
     run_scan = load_scanner()
     observations = [scan_case(run_scan, case, args.mode, scan_threshold) for case in cases]
     return build_report(observations, args.mode, args.threshold, scan_threshold, sweep)
