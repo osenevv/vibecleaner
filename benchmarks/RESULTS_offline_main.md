@@ -1,6 +1,6 @@
 # VibeGuard benchmark
 
-- Timestamp: 2026-11-20T01:17:43Z
+- Timestamp: 2026-11-20T02:54:06Z
 - Mode requested: offline
 - Mode observed: offline
 - Scan threshold: 0.75
@@ -38,39 +38,39 @@
 
 ## Latency
 
-mean 0.0116s, p50 0.0075s, p95 0.0352s over 30 cases
+mean 0.0120s, p50 0.0077s, p95 0.0335s over 30 cases
 
 ## Per case
 
 | case | expected | predicted | result | latency |
 | --- | --- | --- | --- | --- |
-| positive/p01_dotenv_secrets | D1 | D1 | ok | 0.0241s |
-| positive/p02_source_secrets | D1 | D1 | ok | 0.0071s |
-| positive/p03_migration_rls_gaps | D2 | D2 | ok | 0.0040s |
-| positive/p04_cors_wildcard_credentials | D2 | D2 | ok | 0.0095s |
-| positive/p05_unauth_refund | D3 | D3 | ok | 0.0072s |
-| positive/p06_unauth_invite | D3 | D3 | ok | 0.0047s |
-| positive/p07_idor_body_user | D4 | D4 | ok | 0.0095s |
-| positive/p08_client_price_checkout | D4 | D4 | ok | 0.0067s |
-| positive/p09_system_prompt_concat | D5 | D5 | ok | 0.0076s |
-| positive/p10_unbounded_shell_tool | D5 | D5 | ok | 0.0068s |
-| positive/p11_silent_exception | D6a | D6a | ok | 0.0123s |
-| positive/p12_god_billing_module | D6a | D6a | ok | 0.0776s |
-| positive/p13_stubbed_shipping_quote | D6b | D6b | ok | 0.0061s |
-| positive/p14_n_plus_one_orders | D7a | D7a | ok | 0.0085s |
+| positive/p01_dotenv_secrets | D1 | D1 | ok | 0.0221s |
+| positive/p02_source_secrets | D1 | D1 | ok | 0.0074s |
+| positive/p03_migration_rls_gaps | D2 | D2 | ok | 0.0036s |
+| positive/p04_cors_wildcard_credentials | D2 | D2 | ok | 0.0097s |
+| positive/p05_unauth_refund | D3 | D3 | ok | 0.0074s |
+| positive/p06_unauth_invite | D3 | D3 | ok | 0.0046s |
+| positive/p07_idor_body_user | D4 | D4 | ok | 0.0108s |
+| positive/p08_client_price_checkout | D4 | D4 | ok | 0.0071s |
+| positive/p09_system_prompt_concat | D5 | D5 | ok | 0.0078s |
+| positive/p10_unbounded_shell_tool | D5 | D5 | ok | 0.0073s |
+| positive/p11_silent_exception | D6a | D6a | ok | 0.0130s |
+| positive/p12_god_billing_module | D6a | D6a | ok | 0.0913s |
+| positive/p13_stubbed_shipping_quote | D6b | D6b | ok | 0.0058s |
+| positive/p14_n_plus_one_orders | D7a | D7a | ok | 0.0088s |
 | positive/p15_raw_json_body | D7b | D7b | ok | 0.0054s |
-| negative/n01_router_level_auth | — | — | ok | 0.0089s |
-| negative/n02_middleware_matcher | — | — | ok | 0.0075s |
-| negative/n03_logged_value_error | — | — | ok | 0.0080s |
-| negative/n04_catch_log_rethrow | — | — | ok | 0.0060s |
-| negative/n05_publishable_keys | — | — | ok | 0.0036s |
-| negative/n06_env_example | — | — | ok | 0.0048s |
-| negative/n07_rls_later_migration | — | — | ok | 0.0049s |
-| negative/n08_cors_allowlist | — | — | ok | 0.0070s |
-| negative/n09_session_owner_check | — | — | ok | 0.0088s |
+| negative/n01_router_level_auth | — | — | ok | 0.0095s |
+| negative/n02_middleware_matcher | — | — | ok | 0.0076s |
+| negative/n03_logged_value_error | — | — | ok | 0.0079s |
+| negative/n04_catch_log_rethrow | — | — | ok | 0.0055s |
+| negative/n05_publishable_keys | — | — | ok | 0.0032s |
+| negative/n06_env_example | — | — | ok | 0.0049s |
+| negative/n07_rls_later_migration | — | — | ok | 0.0043s |
+| negative/n08_cors_allowlist | — | — | ok | 0.0076s |
+| negative/n09_session_owner_check | — | — | ok | 0.0086s |
 | negative/n10_server_price_lookup | — | — | ok | 0.0093s |
-| negative/n11_guarded_agent | — | — | ok | 0.0117s |
-| negative/n12_batched_pagination | — | — | ok | 0.0099s |
-| negative/n13_schema_validated_body | — | — | ok | 0.0100s |
-| negative/n14_config_enums_and_tests | — | — | ok | 0.0057s |
-| negative/n15_cohesive_rate_table | — | — | ok | 0.0443s |
+| negative/n11_guarded_agent | — | — | ok | 0.0114s |
+| negative/n12_batched_pagination | — | — | ok | 0.0091s |
+| negative/n13_schema_validated_body | — | — | ok | 0.0102s |
+| negative/n14_config_enums_and_tests | — | — | ok | 0.0059s |
+| negative/n15_cohesive_rate_table | — | — | ok | 0.0429s |
