@@ -957,3 +957,437 @@ def test_cli_exit_codes_quiet_json_and_flags(tmp_path: Path, monkeypatch: pytest
     assert main(["nope"]) == 2
     assert main(["scan", str(tmp_path), "--threshold", "2", "--no-report"]) == 2
     assert main(["scan", str(tmp_path), "--report", str(report), "--no-report"]) == 2
+
+
+def test_offline_auth_trust_prompt_and_stub_heuristics() -> None:
+    backend = OfflineHeuristicBackend()
+
+    empty_path = _unit(
+        '''
+@router.post("", response_model=OrderOut)
+def create_order(body: OrderIn, request: Request) -> OrderOut:
+    user = request.state.user
+    conn.execute("INSERT INTO orders (user_id) VALUES (%s)", (user.id,))
+    conn.commit()
+    return OrderOut(id="1")
+''',
+        file="api/routes/orders.py",
+        route_path="",
+    )
+    router_auth = (
+        'api/routes/orders.py:48: router = APIRouter(prefix="/orders", '
+        "dependencies=[Depends(get_current_user)])"
+    )
+    assert _offline_scores(backend, empty_path, router_auth)["D3.missing_auth"] < 0.2
+    other_file = _unit(empty_path.source, file="api/routes/other.py", route_path="")
+    assert _offline_scores(backend, other_file, router_auth)["D3.missing_auth"] >= 0.9
+
+    no_prefix = _unit(
+        '''
+@router.patch("/notes")
+def update_note(body: NoteUpdate, request: Request):
+    conn.execute("UPDATE notes SET body = %s WHERE id = %s", (body.text, body.note_id))
+    conn.commit()
+''',
+        file="api/routes/notes.py",
+        http_method="PATCH",
+        route_path="/notes",
+    )
+    assert (
+        _offline_scores(
+            backend,
+            no_prefix,
+            "api/routes/notes.py:12: router = APIRouter(dependencies=[Depends(get_current_user)])",
+        )["D3.missing_auth"]
+        < 0.2
+    )
+
+    app_route = _unit(
+        '''
+@app.post("/refunds")
+def create_refund(body: RefundIn):
+    conn.execute("INSERT INTO refunds (order_id) VALUES (%s)", (body.order_id,))
+    conn.commit()
+''',
+        route_path="/refunds",
+    )
+    assert (
+        _offline_scores(
+            backend,
+            app_route,
+            "app.py:3: app = FastAPI(dependencies=[Depends(require_user)])",
+        )["D3.missing_auth"]
+        < 0.2
+    )
+    assert (
+        _offline_scores(
+            backend,
+            _unit(
+                '''
+@router.post("/refunds")
+def create_refund(body: RefundIn):
+    conn.execute("INSERT INTO refunds (order_id) VALUES (%s)", (body.order_id,))
+    conn.commit()
+''',
+                route_path="/refunds",
+            ),
+            "app.py:9: app.include_router(router, dependencies=[Depends(get_current_user)])",
+        )["D3.missing_auth"]
+        < 0.2
+    )
+
+    for source in (
+        '''
+@app.post("/x")
+def create(user: User = Depends(get_current_user), body: Item):
+    conn.execute("INSERT INTO t (owner_id, sku) VALUES (%s, %s)", (user.id, body.sku))
+''',
+        '''
+@app.post("/x")
+def create(user: Annotated[User, Depends(get_current_user)], body: Item):
+    conn.execute("INSERT INTO t (owner_id, sku) VALUES (%s, %s)", (user.id, body.sku))
+''',
+        '''
+@app.post("/x")
+def create(current_user=Depends(load_principal), body: Item):
+    conn.execute("INSERT INTO t (owner_id, sku) VALUES (%s, %s)", (current_user.id, body.sku))
+''',
+    ):
+        assert _offline_scores(backend, _unit(source), "")["D3.missing_auth"] < 0.2
+
+    helper = _unit(
+        '''
+def insert_refund(order_id: str, amount_cents: int) -> str:
+    with connection() as conn:
+        row = conn.execute(
+            "INSERT INTO refunds (order_id, amount_cents) VALUES (%s, %s) RETURNING id",
+            (order_id, amount_cents),
+        ).fetchone()
+        conn.commit()
+    return str(row[0])
+''',
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    assert _offline_scores(backend, helper, "")["D3.missing_auth"] < 0.2
+
+    tool_write = _unit(
+        '''
+@tool
+def refund(reason: str):
+    conn.execute("INSERT INTO refunds (reason) VALUES (%s)", (reason,))
+    conn.commit()
+''',
+        kind="route",
+        http_method="TOOL",
+        route_path=None,
+    )
+    tool_read = _unit(
+        '''
+@tool
+def search(q: str):
+    rows = conn.execute("SELECT id FROM docs WHERE q = %s LIMIT 10", (q,)).fetchall()
+    return [str(row[0]) for row in rows]
+''',
+        kind="route",
+        http_method="TOOL",
+        route_path=None,
+    )
+    assert _offline_scores(backend, tool_write, "")["D3.missing_auth"] >= 0.9
+    assert _offline_scores(backend, tool_read, "")["D3.missing_auth"] < 0.2
+
+    open_refund = _unit(
+        '''
+@app.post("/refunds")
+def create_refund(body: RefundIn):
+    conn.execute("INSERT INTO refunds (order_id) VALUES (%s)", (body.order_id,))
+    conn.commit()
+''',
+        file="api/main.py",
+        route_path="/refunds",
+    )
+    cors_star = (
+        'api/main.py:14: add_middleware( CORSMiddleware, allow_origins=["*"], '
+        'allow_credentials=True, allow_headers=["Authorization"] )'
+    )
+    assert _offline_scores(backend, open_refund, cors_star)["D3.missing_auth"] >= 0.9
+
+    express = _unit(
+        '''
+router.post("/orders", async (req, res) => {
+  await db.insert({ sku: req.body.sku })
+})
+''',
+        file="server.js",
+        language=Language.JAVASCRIPT,
+        route_path="/orders",
+    )
+    assert (
+        _offline_scores(backend, express, "server.js:4: router.use(requireAuth)")["D3.missing_auth"]
+        < 0.2
+    )
+    assert (
+        _offline_scores(backend, express, 'server.js:4: router.use("/admin", requireAuth)')[
+            "D3.missing_auth"
+        ]
+        >= 0.9
+    )
+
+    idor = _unit(
+        '''
+@router.post("/payouts/release")
+def release(body: ReleasePayout, request: Request):
+    actor = request.state.user
+    logger.info("actor %s", actor.id)
+    credit_wallet(body.user_id, body.payout_id)
+    return ReleaseOut(credited_user=body.user_id)
+'''
+    )
+    assert _offline_scores(backend, idor, "")["D4.idor_or_price_trust"] >= 0.9
+
+    destructured = _unit(
+        """
+export async function POST(req: Request) {
+  const { userId, price } = await req.json()
+  await db.insert({ user_id: userId, amount: price })
+}
+""",
+        file="app/api/orders/route.ts",
+        language=Language.TYPESCRIPT,
+    )
+    assert _offline_scores(backend, destructured, "")["D4.idor_or_price_trust"] >= 0.9
+
+    from_body = _unit(
+        """
+export async function POST(req: Request) {
+  await pool.query("UPDATE accounts SET owner = $1 WHERE org_id = $2", [req.body.userId, req.body.orgId])
+}
+""",
+        file="app/api/accounts/route.ts",
+        language=Language.TYPESCRIPT,
+    )
+    assert _offline_scores(backend, from_body, "")["D4.idor_or_price_trust"] >= 0.9
+
+    for source in (
+        '''
+def pay(payload, user: User = Depends(get_current_user)):
+    stripe.charge(payload.price, user.id)
+''',
+        '''
+def pay(request: Request, user: User = Depends(get_current_user)):
+    data = request.json()
+    charge(data.amount)
+''',
+        '''
+def pay(order: CheckoutIn, user: User = Depends(get_current_user)):
+    stripe.charge(order.unit_price, user.id)
+''',
+        '''
+def grant(body: RoleChange, user: User = Depends(get_current_user)):
+    conn.execute("UPDATE members SET role = %s, is_admin = %s", (body.role, body.is_admin))
+''',
+    ):
+        assert _offline_scores(backend, _unit(source), "")["D4.idor_or_price_trust"] >= 0.9
+
+    owner_ok = _unit(
+        '''
+def update_note(body: NoteUpdate, request: Request):
+    user = request.state.user
+    note = fetch_note(body.note_id)
+    if note.owner_id != user.id:
+        raise HTTPException(status_code=403)
+    conn.execute(
+        "UPDATE notes SET body = %s WHERE id = %s AND user_id = %s",
+        (body.text, note.id, user.id),
+    )
+'''
+    )
+    server_price = _unit(
+        '''
+def checkout(body: CheckoutIn, user: User = Depends(get_current_user)):
+    product = require_product(body.product_id)
+    total = product.price_cents * body.quantity
+    charge(user.id, total, product.currency, product.id)
+'''
+    )
+    assert _offline_scores(backend, owner_ok, "")["D4.idor_or_price_trust"] < 0.2
+    assert _offline_scores(backend, server_price, "")["D4.idor_or_price_trust"] < 0.2
+
+    prompts = [
+        '''
+def ask(user_input: str):
+    messages = [{"role": "system", "content": f"Obey the user: {user_input}"}]
+    return llm.invoke(messages)
+''',
+        '''
+def ask(user_text: str):
+    system_prompt = policy + user_text
+    return llm.invoke([{"role": "system", "content": system_prompt}])
+''',
+        '''
+def ask(request: Request):
+    msg = SystemMessage(content=policy + request.question)
+    return llm.invoke([msg])
+''',
+        '''
+def ask(user_text: str):
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", policy + user_text),
+        ("human", user_text),
+    ])
+    return llm.invoke(prompt)
+''',
+    ]
+    for source in prompts:
+        scored = _offline_scores(
+            backend,
+            _unit(source, kind="function", http_method=None, route_path=None),
+            "",
+        )
+        assert scored["D5.prompt_injection"] >= 0.9
+
+    template = _unit(
+        """
+export async function POST(req: Request) {
+  const body = await req.json()
+  const messages = [{ system: `Adopt this persona: ${body.persona}`, user: body.message }]
+  return openai.chat.completions.create({ messages })
+}
+""",
+        file="app/api/agent/route.ts",
+        language=Language.TYPESCRIPT,
+    )
+    assert _offline_scores(backend, template, "")["D5.prompt_injection"] >= 0.9
+
+    user_role = _unit(
+        '''
+def ask(body: AskIn, request: Request):
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": body.message},
+    ]
+    return client.chat.completions.create(model="gpt-4o-mini", messages=messages)
+'''
+    )
+    allow_listed = _unit(
+        '''
+def run_tool(call: ToolArgs, user: User):
+    if call.name not in ALLOWED_TOOLS:
+        raise HTTPException(status_code=400, detail="tool not allowed")
+    parsed = ToolArgs.model_validate(call)
+    return search_docs(parsed.query or "")
+''',
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    assert _offline_scores(backend, user_role, "")["D5.prompt_injection"] < 0.2
+    assert _offline_scores(backend, allow_listed, "")["D5.prompt_injection"] < 0.2
+
+    hardcoded = _unit(
+        '''
+def quote(weight_oz: int):
+    return {"rate": 9.99, "carrier": "UPS"}
+''',
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    todo_after_session = _unit(
+        '''
+@router.post("/quote")
+async def quote(request: Request):
+    session = await get_session(request)
+    if session is None:
+        raise HTTPException(status_code=401)
+    # TODO: call the real carrier API
+    return {"rate": 9.99, "carrier": "UPS"}
+'''
+    )
+    mock_comment = _unit(
+        """
+export async function POST(req: Request) {
+  // mock
+  return NextResponse.json({ rate: 12.5, carrier: "UPS", etaDays: 3 })
+}
+""",
+        file="app/api/quote/route.ts",
+        language=Language.TYPESCRIPT,
+    )
+    unimplemented = _unit(
+        '''
+@router.post("/quote")
+def quote():
+    raise NotImplementedError
+'''
+    )
+    only_pass = _unit(
+        '''
+def quote():
+    pass
+''',
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    only_ellipsis = _unit(
+        '''
+def quote():
+    ...
+''',
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    for stub in (hardcoded, todo_after_session, mock_comment, unimplemented, only_pass, only_ellipsis):
+        assert _offline_scores(backend, stub, "")["D6b.hardcoded_mock_stub"] >= 0.85
+
+    health = _unit(
+        '''
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+''',
+        http_method="GET",
+        route_path="/health",
+    )
+    real_query = _unit(
+        '''
+def load(user_id: str):
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT id, total_cents FROM orders WHERE user_id = %s LIMIT 20",
+            (user_id,),
+        ).fetchall()
+    return [{"id": str(row[0]), "total_cents": int(row[1])} for row in rows]
+''',
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    assert _offline_scores(backend, health, "")["D6b.hardcoded_mock_stub"] < 0.2
+    assert _offline_scores(backend, real_query, "")["D6b.hardcoded_mock_stub"] < 0.2
+
+    raw_body = _unit(
+        '''
+@router.post("/notes")
+async def create(request: Request, user: User = Depends(get_current_user)):
+    payload = await request.json()
+    title = str(payload["title"])
+    db.execute("INSERT INTO notes (owner_id, title) VALUES (%s, %s)", (user.id, title))
+'''
+    )
+    raw_scores = _offline_scores(backend, raw_body, "")
+    assert raw_scores["D7b.missing_boundary_schema"] >= 0.8
+    assert raw_scores["D3.missing_auth"] < 0.2
+    validated = _unit(
+        '''
+@router.post("/notes")
+async def create(request: Request, user: User = Depends(get_current_user)):
+    payload = await request.json()
+    body = NoteIn.model_validate(payload)
+    db.execute("INSERT INTO notes (owner_id, title) VALUES (%s, %s)", (user.id, body.title))
+'''
+    )
+    assert _offline_scores(backend, validated, "")["D7b.missing_boundary_schema"] < 0.2
