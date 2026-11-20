@@ -20,7 +20,7 @@ inputs:
     required: false
     default: auto
   threshold:
-    description: Layer 2 probability threshold (0 through 1)
+    description: Layer 2 probability threshold (0.01 through 0.99)
     required: false
     default: "0.75"
   fail-on:

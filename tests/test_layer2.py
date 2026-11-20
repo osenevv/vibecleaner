@@ -1487,10 +1487,12 @@ def test_cache_rejects_scores_outside_unit_interval(tmp_path: Path, caplog: pyte
         json.dumps({"version": 1, "entries": {key: {"model": OFFLINE_MODEL, "scores": scores}}}),
         encoding="utf-8",
     )
-    cache = DecisionCache(path, model=OFFLINE_MODEL)
     with caplog.at_level(logging.WARNING):
-        assert cache.get(unit, "") is None
-    assert "finite" in caplog.text.lower() or "[0, 1]" in caplog.text
+        cache = DecisionCache(path, model=OFFLINE_MODEL)
+    assert cache.get(unit, "") is None
+    assert "invalid cache" in caplog.text.lower()
+    cache.save()
+    assert key not in json.loads(path.read_text(encoding="utf-8"))["entries"]
 
     scores["D3.missing_auth"] = 0.4
     del scores["D4.idor_or_price_trust"]
@@ -1499,10 +1501,81 @@ def test_cache_rejects_scores_outside_unit_interval(tmp_path: Path, caplog: pyte
         encoding="utf-8",
     )
     caplog.clear()
-    reloaded = DecisionCache(path, model=OFFLINE_MODEL)
     with caplog.at_level(logging.WARNING):
-        assert reloaded.get(unit, "") is None
-    assert caplog.records
+        reloaded = DecisionCache(path, model=OFFLINE_MODEL)
+    assert reloaded.get(unit, "") is None
+    assert "invalid cache" in caplog.text.lower()
+
+
+def test_cache_keeps_module_risk_across_reload(tmp_path: Path) -> None:
+    class _RiskBackend:
+        name = OFFLINE_MODEL
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def judge_chunk(self, auth_context: str, units: list[CodeUnit]) -> ChunkVerdict:
+            self.calls += 1
+            scores = {
+                unit.unit_id: {
+                    rule_id: (0.9 if rule_id == "D3.missing_auth" else 0.05) for rule_id in LAYER2_RULE_IDS
+                }
+                for unit in units
+            }
+            return ChunkVerdict(
+                scores=scores,
+                severity={unit.unit_id: 0.4 for unit in units},
+                input_tokens=3,
+            )
+
+    path = tmp_path / ".vibeguard_cache.json"
+    backend = _RiskBackend()
+    unit = _unit("def create():\n    return 1\n", name="create")
+    ctx = _ctx([unit])
+    cache = DecisionCache(path, model=OFFLINE_MODEL)
+    findings, _stats = judge(ctx, backend, cache, threshold=0.75)
+    assert findings[0].module_risk == pytest.approx(0.4)
+    cache.save()
+
+    backend.calls = 0
+    reloaded = DecisionCache(path, model=OFFLINE_MODEL)
+    findings, stats = judge(ctx, backend, reloaded, threshold=0.75)
+    assert backend.calls == 0
+    assert stats.cache_hits == 1
+    # Peak noul is 0.9, so the offline fallback would report 2.0. The cached
+    # severity answer has to survive the reload instead.
+    assert findings[0].module_risk == pytest.approx(0.4)
+
+
+def test_cache_save_merges_entries_from_a_stale_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / ".vibeguard_cache.json"
+    first = DecisionCache(path, model=OFFLINE_MODEL)
+    second = DecisionCache(path, model=OFFLINE_MODEL)
+    unit_a = _unit("def alpha():\n    return 1\n", name="alpha")
+    unit_b = _unit("def beta():\n    return 2\n", name="beta")
+    scores = {rule_id: 0.2 for rule_id in LAYER2_RULE_IDS}
+    first.put(unit_a, "", scores, module_risk=0.4)
+    second.put(unit_b, "", scores, module_risk=1.0)
+    first.save()
+    second.save()
+    merged = DecisionCache(path, model=OFFLINE_MODEL)
+    assert merged.get(unit_a, "")["D3.missing_auth"] == pytest.approx(0.2)
+    assert merged.get(unit_b, "")["D3.missing_auth"] == pytest.approx(0.2)
+    assert merged.module_risk(unit_a, "") == pytest.approx(0.4)
+    assert merged.module_risk(unit_b, "") == pytest.approx(1.0)
+
+
+def test_threshold_outside_noul_range_is_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["scan", str(tmp_path), "--threshold", "1", "--no-report", "--mode", "offline"]) == 2
+    assert main(["scan", str(tmp_path), "--threshold", "0", "--no-report", "--mode", "offline"]) == 2
+    assert "0.01" in capsys.readouterr().err
+    with pytest.raises(DecisionAPIError, match="0.01"):
+        judge(
+            _ctx([_unit("x = 1\n")]),
+            _FixedBackend({rule_id: 0.99 for rule_id in LAYER2_RULE_IDS}),
+            DecisionCache(tmp_path / "unused.json", enabled=False),
+            threshold=1,
+        )
 
 
 def test_offline_cache_key_includes_heuristic_version(monkeypatch: pytest.MonkeyPatch) -> None:

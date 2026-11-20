@@ -50,8 +50,12 @@ def _main(argv: list[str]) -> int:
     if args.command == "version":
         print(__version__)
         return 0
-    if not math.isfinite(args.threshold) or not 0.0 <= args.threshold <= 1.0:
-        print("error: --threshold must be between 0 and 1", file=sys.stderr)
+    if not math.isfinite(args.threshold) or not 0.01 <= args.threshold <= 0.99:
+        print(
+            "error: --threshold must be between 0.01 and 0.99 "
+            "(noul never returns 0 or 1, so a cutoff outside that range cannot fail the scan)",
+            file=sys.stderr,
+        )
         return 2
     if args.no_report and args.report:
         print("error: pass only one of --report and --no-report", file=sys.stderr)

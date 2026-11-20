@@ -56,6 +56,7 @@ _SKIPPED_FILES = frozenset(
     {
         "VIBEGUARD_REPORT.md",
         ".vibeguard_cache.json",
+        ".vibeguard_cache.json.lock",
         "vibeguard.sarif",
         "package-lock.json",
         "yarn.lock",

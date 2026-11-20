@@ -61,6 +61,26 @@ class DecisionBackend(Protocol):
         """Score one chunk. ``scores`` maps unit_id -> rule_id -> noul."""
 
 
+def require_threshold(threshold: float) -> float:
+    """Reject cutoffs that noul can never cross.
+
+    gemini-decision-1 returns a probability in 0.01..0.99. A cutoff of 0 flags
+    every scored rule, and a cutoff of 1 flags none, so neither is a real gate.
+    """
+    if isinstance(threshold, bool):
+        raise DecisionAPIError("threshold must be a probability between 0.01 and 0.99")
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise DecisionAPIError("threshold must be a probability between 0.01 and 0.99") from exc
+    if value != value or value in (float("inf"), float("-inf")) or not 0.01 <= value <= 0.99:
+        raise DecisionAPIError(
+            f"threshold {threshold} is outside 0.01..0.99. "
+            "noul never returns 0 or 1, so a cutoff outside that range cannot fail the scan."
+        )
+    return value
+
+
 def estimate_tokens(text: str) -> int:
     """Rough token count used only for chunking (about 4 characters per token)."""
     if not text:
@@ -422,6 +442,7 @@ async def judge_async(
     concurrency: int = 4,
 ) -> tuple[list[Finding], JudgeStats]:
     """Judge ``ctx.units``, serving cached scores and continuing after a failed chunk."""
+    threshold = require_threshold(threshold)
     stats = JudgeStats()
     skip = set(skip_unit_ids)
     stats.units_skipped_layer1 = sum(1 for unit in ctx.units if unit.unit_id in skip)

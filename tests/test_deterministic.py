@@ -184,6 +184,7 @@ def test_walk_repo_tracked_env_included_and_untracked_ignored_env_excluded(tmp_p
 def test_walk_repo_skips_vibeguard_outputs(tmp_path: Path) -> None:
     (tmp_path / "VIBEGUARD_REPORT.md").write_text("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY\n")
     (tmp_path / ".vibeguard_cache.json").write_text("{}\n")
+    (tmp_path / ".vibeguard_cache.json.lock").write_text("\n")
     (tmp_path / "vibeguard.sarif").write_text("{}\n")
     (tmp_path / "app.py").write_text("x = 1\n")
     assert [item.path for item in walk_repo(tmp_path)] == ["app.py"]

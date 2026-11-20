@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -106,7 +107,7 @@ class DecisionCache:
         entry = self._entries.get(cache_key(self.model, unit, auth_context))
         if not isinstance(entry, dict) or entry.get("model") != self.model:
             return None
-        return _optional_risk(entry.get("module_risk"))
+        return _bounded_risk(entry.get("module_risk"))
 
     def put(
         self,
@@ -123,7 +124,7 @@ class DecisionCache:
             return
         key = cache_key(self.model, unit, auth_context)
         entry: dict[str, object] = {"scores": stored, "model": self.model}
-        risk = _optional_risk(module_risk)
+        risk = _bounded_risk(module_risk)
         if risk is not None:
             entry["module_risk"] = risk
         if self._entries.get(key) == entry:
@@ -134,9 +135,20 @@ class DecisionCache:
     def save(self) -> None:
         if not self.enabled or not self._dirty:
             return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                self._merge_disk_entries()
+                self._write_atomic()
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        self._dirty = False
+
+    def _write_atomic(self) -> None:
         payload = {"version": CACHE_VERSION, "entries": self._entries}
         text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
             prefix=".vibeguard_cache.",
             suffix=".tmp",
@@ -154,7 +166,6 @@ class DecisionCache:
             except OSError:
                 pass
             raise
-        self._dirty = False
 
     def _load(self) -> None:
         if not self.path.exists():
@@ -178,31 +189,62 @@ class DecisionCache:
             log.warning("Ignoring decision cache %s: entries is not an object", self.path)
             self._entries = {}
             return
-        cleaned: dict[str, dict[str, object]] = {}
-        dropped = 0
-        for key, entry in raw_entries.items():
-            parsed = _parse_entry(entry)
-            if parsed is None:
-                dropped += 1
-                continue
-            cleaned[str(key)] = parsed
+        cleaned, dropped = _collect_entries(raw_entries)
         if dropped:
-            log.warning("Dropped %s unreadable cache entries in %s", dropped, self.path)
+            log.warning("Dropped %s invalid cache entries in %s", dropped, self.path)
+            # A later save rewrites the file without the rejected entries.
+            self._dirty = True
         self._entries = cleaned
+
+    def _merge_disk_entries(self) -> None:
+        """Keep keys another process stored after this cache was loaded.
+
+        Called only while the cache lock is held. Keys already in memory win,
+        because they are the scores this process just computed.
+        """
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            log.warning("Not merging unreadable decision cache %s: %s", self.path, exc)
+            return
+        if not isinstance(data, dict) or data.get("version") != CACHE_VERSION:
+            return
+        raw_entries = data.get("entries", {})
+        if not isinstance(raw_entries, dict):
+            return
+        disk_entries, _dropped = _collect_entries(raw_entries)
+        for key, entry in disk_entries.items():
+            self._entries.setdefault(key, entry)
+
+
+def _collect_entries(raw_entries: dict[object, object]) -> tuple[dict[str, dict[str, object]], int]:
+    cleaned: dict[str, dict[str, object]] = {}
+    dropped = 0
+    for key, entry in raw_entries.items():
+        parsed = _parse_entry(entry)
+        if parsed is None:
+            dropped += 1
+            continue
+        cleaned[str(key)] = parsed
+    return cleaned, dropped
 
 
 def _parse_entry(entry: object) -> dict[str, object] | None:
     if not isinstance(entry, dict):
         return None
     model = entry.get("model")
-    scores = entry.get("scores")
-    if not isinstance(model, str) or not isinstance(scores, dict) or not scores:
+    if not isinstance(model, str):
         return None
-    try:
-        parsed = {str(rule_id): float(value) for rule_id, value in scores.items()}
-    except (TypeError, ValueError):
+    scores = _validated_scores(entry.get("scores"))
+    if scores is None:
         return None
-    return {"scores": parsed, "model": model}
+    parsed: dict[str, object] = {"scores": scores, "model": model}
+    risk = _bounded_risk(entry.get("module_risk"))
+    if risk is not None:
+        parsed["module_risk"] = risk
+    return parsed
 
 
 def _scores_for_model(entry: object, model: str) -> dict[str, float] | None:
@@ -235,10 +277,11 @@ def _unit_interval(value: object) -> float | None:
     return number
 
 
-def _optional_risk(value: object) -> float | None:
+def _bounded_risk(value: object) -> float | None:
+    """Keep a severity-question score only when it lies on the 0..2 rubric."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
-    if not math.isfinite(number):
+    if not math.isfinite(number) or not 0.0 <= number <= 2.0:
         return None
     return number

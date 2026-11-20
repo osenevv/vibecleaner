@@ -47,7 +47,7 @@ vibeguard scan . --fix                    # draft patches for critical findings 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--mode auto\|live\|offline\|off` | `auto` | `live` = gemini-decision-1, `offline` = heuristic judge, `off` = Layer 1 only, `auto` = live if a key is set |
-| `--threshold` | `0.75` | `noul` cut-off for Layer 2 findings |
+| `--threshold` | `0.75` | `noul` cut-off, from 0.01 to 0.99 |
 | `--fail-on critical\|high\|medium\|low\|none` | `high` | lowest severity that fails the run |
 | `--report PATH` / `--no-report` | `<root>/VIBEGUARD_REPORT.md` | markdown report |
 | `--no-cache` | off | ignore `.vibeguard_cache.json` |
@@ -167,11 +167,13 @@ Takeaways: the deterministic layer is exact on every set. The offline Layer 2 he
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                                   # 69 tests, < 1 s, no network
+pytest -q                                   # 73 tests, < 1 s, no network
 python benchmarks/run_eval.py --mode offline
 vibeguard scan . --mode offline             # VibeGuard passes its own gate
 scripts/demo.sh                             # ~40 s terminal demo on a throwaway vibe-coded app
 ```
+
+States, invariants, and the cache and threshold fixes are in [`docs/state-machines.md`](docs/state-machines.md).
 
 | Module | Responsibility |
 | --- | --- |
