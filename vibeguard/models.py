@@ -115,6 +115,38 @@ RULES: dict[str, RuleSpec] = {
             "Acquire inside a with-statement, or release in a finally that runs on every exit after the acquire.",
         ),
         RuleSpec(
+            "D9.weak_type", "D9", "Weak type that silences the checker", Category.SLOP, Severity.MEDIUM, 1,
+            "Replace `any` / `as any` / `as unknown as` / bare `# type: ignore` with the real type; fix the type error instead of hiding it.",
+        ),
+        RuleSpec(
+            "D9.debug_leftover", "D9", "Debug leftover in production code", Category.SLOP, Severity.LOW, 1,
+            "Remove `debugger`, `breakpoint()`, `pdb.set_trace()` and stray `console.log` from shipped code; use the project logger.",
+        ),
+        RuleSpec(
+            "D9.larp_comment", "D9", "Comment narrating in-motion work or a placeholder", Category.SLOP, Severity.LOW, 1,
+            "Delete comments about what changed or what a real implementation would do; fix the code or state the constraint it hides.",
+        ),
+        RuleSpec(
+            "D9.legacy_fallback", "D9", "Legacy, backup, or parallel-version code path", Category.SLOP, Severity.LOW, 1,
+            "Keep one code path: delete `_old` / `_legacy` / `_v1` copies and backup files once callers use the current one.",
+        ),
+        RuleSpec(
+            "D9.pointless_catch", "D9", "Catch block that only rethrows", Category.SLOP, Severity.LOW, 1,
+            "Remove the try/catch; it adds a stack frame and hides nothing. Handle the error where there is something to do.",
+        ),
+        RuleSpec(
+            "D9.unused_private", "D9", "Private helper never referenced", Category.SLOP, Severity.LOW, 1,
+            "Delete the unreferenced private function or class; agents copy dead code as if it were a pattern.",
+        ),
+        RuleSpec(
+            "D9.duplicate_function", "D9", "Duplicated function body", Category.SLOP, Severity.MEDIUM, 1,
+            "Keep one implementation and call it from both places, unless the copies are meant to diverge.",
+        ),
+        RuleSpec(
+            "D9.circular_import", "D9", "Circular import between modules", Category.SLOP, Severity.MEDIUM, 1,
+            "Break the cycle: move the shared piece into a module both sides import, or invert the dependency.",
+        ),
+        RuleSpec(
             "D3.missing_auth", "D3", "Missing authentication on mutating route", Category.SECURITY, Severity.CRITICAL, 2,
             "Require an authenticated session (route dependency, middleware matcher, or explicit session check) before the mutation.",
             question=(
@@ -178,6 +210,19 @@ RULES: dict[str, RuleSpec] = {
 }
 
 LAYER2_RULE_IDS: tuple[str, ...] = tuple(r.rule_id for r in RULES.values() if r.layer == 2)
+
+# Project rules from `.vibeguard/rules.json` use this prefix so they can never
+# shadow a built-in rule id.
+PROJECT_RULE_PREFIX = "P."
+
+
+def register_project_rule(spec: RuleSpec) -> None:
+    """Add a project-defined Layer 1 rule. Built-in ids cannot be replaced."""
+    if not spec.rule_id.startswith(PROJECT_RULE_PREFIX):
+        raise ValueError(f"project rule id must start with {PROJECT_RULE_PREFIX!r}: {spec.rule_id!r}")
+    if spec.layer != 1:
+        raise ValueError(f"project rules are Layer 1 only: {spec.rule_id!r}")
+    RULES[spec.rule_id] = spec
 
 # Short question-key suffixes for the Decisions API (keys must match [A-Za-z0-9_-]+).
 LAYER2_KEY_SUFFIX: dict[str, str] = {
@@ -292,6 +337,26 @@ class JudgeStats:
     errors: list[str] = field(default_factory=list)
 
 
+class RiskTier(str, Enum):
+    HIGH = "high"  # auth, payments, data integrity, migrations, security config
+    MEDIUM = "medium"  # API routes, data access, background jobs
+    LOW = "low"  # UI, docs, tests, internal scripts
+
+    @property
+    def rank(self) -> int:
+        return {"high": 3, "medium": 2, "low": 1}[self.value]
+
+
+@dataclass
+class ReviewRouting:
+    """Which review tier a change needs: 1 static-only .. 4 security review."""
+
+    tier: int
+    reason: str
+    file_risk: dict[str, RiskTier] = field(default_factory=dict)
+    human_review: list[str] = field(default_factory=list)  # files a person should read
+
+
 @dataclass
 class ScanResult:
     root: Path
@@ -300,3 +365,4 @@ class ScanResult:
     judge: JudgeStats
     duration_s: float
     diff_base: str | None = None
+    review: ReviewRouting | None = None
