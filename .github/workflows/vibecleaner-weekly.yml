@@ -1,0 +1,47 @@
+name: VibeCleaner weekly
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+# contents: read checks out the repo. actions: write is what upload-artifact needs
+# once a workflow sets an explicit permissions block.
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  continuous-cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .
+      - name: Deslop
+        run: vibecleaner deslop . --fail-on none
+      - name: Preflight
+        # Exit 1 is blockers. Exit 2 (crash or a broken rules file) fails the job.
+        run: vibecleaner preflight . || [ $? -eq 1 ]
+      - name: States
+        run: vibecleaner states . --fail-on none
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibecleaner-weekly
+          path: |
+            VIBECLEANER_DESLOP.md
+            VIBECLEANER_PREFLIGHT.md
+            VIBECLEANER_STATES.md
+      - name: Append deslop summary
+        run: |
+          {
+            echo "## Deslop"
+            echo
+            sed -n '1,4p' VIBECLEANER_DESLOP.md
+            echo
+            grep -E '^## (dedupe|types|dead-code|cycles|weak-types|defensive-code|legacy|ai-slop) ' VIBECLEANER_DESLOP.md
+          } >> "$GITHUB_STEP_SUMMARY"
