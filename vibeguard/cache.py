@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -32,6 +33,11 @@ def question_set_version(model: str) -> str:
     hasher = hashlib.sha256()
     hasher.update(model.encode("utf-8"))
     hasher.update(b"\0")
+    if model == OFFLINE_MODEL:
+        from vibeguard.offline_heuristics import OFFLINE_HEURISTIC_VERSION
+
+        hasher.update(str(OFFLINE_HEURISTIC_VERSION).encode("utf-8"))
+        hasher.update(b"\0")
     for rule_id in LAYER2_RULE_IDS:
         spec = RULES[rule_id]
         for part in (spec.question, spec.true_description, spec.false_description):
@@ -77,22 +83,49 @@ class DecisionCache:
     def get(self, unit: CodeUnit, auth_context: str) -> dict[str, float] | None:
         if not self.enabled:
             return None
-        entry = self._entries.get(cache_key(self.model, unit, auth_context))
+        key = cache_key(self.model, unit, auth_context)
+        entry = self._entries.get(key)
+        if entry is None:
+            self._misses += 1
+            return None
         scores = _scores_for_model(entry, self.model)
         if scores is None:
             self._misses += 1
+            if isinstance(entry, dict) and entry.get("model") == self.model:
+                log.warning(
+                    "Ignoring invalid decision cache entry %s: every Layer-2 score must be a finite float in [0, 1]",
+                    key[:12],
+                )
             return None
         self._hits += 1
         return scores
 
-    def put(self, unit: CodeUnit, auth_context: str, scores: dict[str, float]) -> None:
+    def module_risk(self, unit: CodeUnit, auth_context: str) -> float | None:
+        if not self.enabled:
+            return None
+        entry = self._entries.get(cache_key(self.model, unit, auth_context))
+        if not isinstance(entry, dict) or entry.get("model") != self.model:
+            return None
+        return _optional_risk(entry.get("module_risk"))
+
+    def put(
+        self,
+        unit: CodeUnit,
+        auth_context: str,
+        scores: dict[str, float],
+        module_risk: float | None = None,
+    ) -> None:
         if not self.enabled:
             return
-        stored = {str(rule_id): float(value) for rule_id, value in scores.items()}
-        if not stored:
+        stored = _validated_scores(scores)
+        if stored is None:
+            log.warning("Refusing to cache Layer-2 scores that are not finite floats in [0, 1]")
             return
         key = cache_key(self.model, unit, auth_context)
-        entry = {"scores": stored, "model": self.model}
+        entry: dict[str, object] = {"scores": stored, "model": self.model}
+        risk = _optional_risk(module_risk)
+        if risk is not None:
+            entry["module_risk"] = risk
         if self._entries.get(key) == entry:
             return
         self._entries[key] = entry
@@ -175,12 +208,37 @@ def _parse_entry(entry: object) -> dict[str, object] | None:
 def _scores_for_model(entry: object, model: str) -> dict[str, float] | None:
     if not isinstance(entry, dict) or entry.get("model") != model:
         return None
-    scores = entry.get("scores")
-    if not isinstance(scores, dict) or not scores:
+    return _validated_scores(entry.get("scores"))
+
+
+def _validated_scores(scores: object) -> dict[str, float] | None:
+    """Accept an entry only when every Layer-2 rule id is a finite probability."""
+    if not isinstance(scores, dict):
         return None
     out: dict[str, float] = {}
-    for rule_id, value in scores.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+    for rule_id in LAYER2_RULE_IDS:
+        if rule_id not in scores:
             return None
-        out[str(rule_id)] = float(value)
-    return out or None
+        number = _unit_interval(scores[rule_id])
+        if number is None:
+            return None
+        out[rule_id] = number
+    return out
+
+
+def _unit_interval(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        return None
+    return number
+
+
+def _optional_risk(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number

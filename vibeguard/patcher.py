@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 from typing import Any
 
 from vibeguard.models import FIX_THRESHOLD, Finding, ScanContext, Severity
+from vibeguard.redact import redact_secrets
+from vibeguard.settings import api_key, fix_model
 
 log = logging.getLogger(__name__)
-
-DEFAULT_FIX_MODEL = "gemini-2.5-flash"
 _DIFF_FENCE = re.compile(r"```(?:diff)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -29,13 +28,13 @@ def generate_fixes(
     severity ``critical`` and probability >= ``FIX_THRESHOLD``. Without an API
     key (and without an injected client) this logs a warning and returns 0.
     """
-    if client is None and _api_key() is None:
+    if client is None and api_key() is None:
         log.warning("Skipping --fix: set GEMINI_API_KEY or GOOGLE_API_KEY to draft patches.")
         return 0
     candidates = [finding for finding in findings if _eligible(finding)]
     if not candidates:
         return 0
-    model_name = model or os.environ.get("VIBEGUARD_FIX_MODEL") or DEFAULT_FIX_MODEL
+    model_name = model or fix_model()
     return asyncio.run(_draft_all(candidates, ctx, model_name, client))
 
 
@@ -47,14 +46,6 @@ def _eligible(finding: Finding) -> bool:
     return finding.probability is not None and finding.probability >= FIX_THRESHOLD
 
 
-def _api_key() -> str | None:
-    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value
-    return None
-
-
 async def _draft_all(
     findings: list[Finding],
     ctx: ScanContext,
@@ -64,7 +55,7 @@ async def _draft_all(
     if client is None:
         from google import genai
 
-        client = genai.Client(api_key=_api_key())
+        client = genai.Client(api_key=api_key())
     semaphore = asyncio.Semaphore(4)
 
     async def draft(finding: Finding) -> int:
@@ -94,7 +85,7 @@ async def _draft_all(
                     finding.line,
                 )
                 return 0
-            finding.fix_patch = diff
+            finding.fix_patch = redact_secrets(diff)
             return 1
 
     drafted = await asyncio.gather(*(draft(finding) for finding in findings))
@@ -113,7 +104,7 @@ def _prompt(finding: Finding, ctx: ScanContext) -> str:
         f"Remediation: {spec.remediation}\n"
         f"Finding: {finding.message}\n\n"
         "Excerpt:\n"
-        f"{_excerpt(finding, ctx)}\n"
+        f"{redact_secrets(_excerpt(finding, ctx))}\n"
     )
 
 

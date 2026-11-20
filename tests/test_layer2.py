@@ -23,7 +23,6 @@ from vibeguard.decision_judge import (
     ChunkVerdict,
     DecisionAPIError,
     GeminiDecisionBackend,
-    OfflineHeuristicBackend,
     build_payload,
     chunk_units,
     estimate_tokens,
@@ -32,6 +31,7 @@ from vibeguard.decision_judge import (
     select_backend,
     units_to_skip,
 )
+from vibeguard.offline_heuristics import OFFLINE_HEURISTIC_VERSION, OfflineHeuristicBackend
 from vibeguard.models import (
     LAYER2_KEY_SUFFIX,
     LAYER2_RULE_IDS,
@@ -232,6 +232,7 @@ def test_gemini_backend_maps_attribute_answers_and_threshold() -> None:
     assert finding.end_line == unit.end_line
     assert finding.symbol == "create_order"
     assert finding.probability == pytest.approx(0.91)
+    assert finding.module_risk == pytest.approx(1.4)
     assert "Missing authentication on mutating route" in finding.message
     assert "POST" in finding.message and "/api/orders" in finding.message
 
@@ -688,8 +689,8 @@ def test_reporter_quiet_pass_and_findings() -> None:
     assert lines[0].startswith(
         "CRITICAL D3.missing_auth app.py:4 (p=0.91) Missing authentication"
     )
-    assert lines[-1].startswith("VIBEGUARD: FAIL findings=1 security=")
-    assert "errors=1" in lines[-1]
+    assert lines[-1] == "VIBEGUARD: ERROR 1 Layer-2 chunk(s) failed: chunk failed"
+    assert "VIBEGUARD: PASS" not in console.export_text()
     assert "│" not in console.export_text()
 
     console = Console(record=True, width=200)
@@ -703,7 +704,7 @@ def test_reporter_quiet_pass_and_findings() -> None:
     assert "input tokens: 1000000" in text
     assert "$0.10/1M" in text
     assert "D3.missing_auth" in text
-    assert "Severity" in text and "Message" in text
+    assert "Severity" in text and "Finding" in text
     console = Console(record=True, width=200)
     render_terminal(_scan_result([finding], errors=["boom [app.py:4:create]"]), console, quiet=False)
     assert "boom [app.py:4:create]" in console.export_text()
@@ -736,7 +737,7 @@ def test_markdown_sarif_and_json(tmp_path: Path) -> None:
 
     sarif = to_sarif(result)
     assert sarif["version"] == "2.1.0"
-    assert sarif["$schema"].endswith("sarif-schema-2.1.0.json")
+    assert sarif["$schema"] == "https://json.schemastore.org/sarif-2.1.0.json"
     driver = sarif["runs"][0]["tool"]["driver"]
     assert driver["name"] == "VibeGuard"
     assert driver["version"]
@@ -760,6 +761,8 @@ def test_markdown_sarif_and_json(tmp_path: Path) -> None:
     assert location["region"] == {"startLine": 8, "endLine": 11}
     assert secret["properties"]["layer"] == 1
     assert "probability" in secret["properties"]
+    assert "module_risk" in secret["properties"]
+    assert "| Risk |" in markdown
     high = Finding("D2.cors_wildcard_credentials", "main.py", 2, "cors")
     high_level = to_sarif(_scan_result([high]))["runs"][0]["results"][0]["level"]
     assert high_level == "error"
@@ -773,6 +776,8 @@ def test_markdown_sarif_and_json(tmp_path: Path) -> None:
     assert payload["judge"]["input_tokens"] == 1_000_000
     assert payload["judge"]["estimated_cost_usd"] == pytest.approx(0.10)
     assert payload["findings"][0]["severity"] == "critical"
+    assert payload["findings"][0]["module_risk"] is None
+    assert "module_risk" in payload["findings"][0]
     assert payload["diff_base"] == "main"
 
 
@@ -1391,3 +1396,444 @@ async def create(request: Request, user: User = Depends(get_current_user)):
 '''
     )
     assert _offline_scores(backend, validated, "")["D7b.missing_boundary_schema"] < 0.2
+
+
+def test_units_to_skip_only_when_layer1_is_critical() -> None:
+    unit = _unit("x = 1\n", file="a.py", start_line=10, end_line=20, name="create")
+    medium = Finding("D6a.silent_exception", "a.py", 12, "swallowed")
+    high = Finding("D6a.deprecated_sdk", "a.py", 14, "old")
+    critical = Finding("D1.hardcoded_secret", "a.py", 16, "secret")
+    assert medium.severity.value == "medium"
+    assert units_to_skip([unit], [medium, high]) == set()
+    assert units_to_skip([unit], [medium, critical]) == {unit.unit_id}
+
+
+def test_unauthenticated_post_with_silent_except_reports_both(tmp_path: Path) -> None:
+    (tmp_path / "orders.py").write_text(
+        "from fastapi import FastAPI, Request\n"
+        "\n"
+        "app = FastAPI()\n"
+        "\n"
+        "@app.post('/orders')\n"
+        "async def create_order(request: Request):\n"
+        "    try:\n"
+        "        body = await request.json()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    db.execute('INSERT INTO orders (sku) VALUES (%s)', (body['sku'],))\n",
+        encoding="utf-8",
+    )
+    result, _ctx = run_scan(tmp_path, mode="offline", use_cache=False)
+    rules = {finding.rule_id for finding in result.findings}
+    assert "D6a.silent_exception" in rules
+    assert "D3.missing_auth" in rules
+
+
+def test_judge_errors_exit_2_and_quiet_never_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run_scan(root, diff_base=None, mode="auto", threshold=0.75, use_cache=True, fix=False):
+        ctx = ScanContext(root=Path(root), files=[], units=[], auth_context="")
+        result = ScanResult(
+            root=Path(root),
+            findings=[Finding("D7b.missing_boundary_schema", "a.py", 3, "raw", probability=0.8)],
+            files_scanned=1,
+            judge=JudgeStats(mode="offline", errors=["chunk exploded"]),
+            duration_s=0.01,
+        )
+        return result, ctx
+
+    monkeypatch.setattr("vibeguard.cli.run_scan", fake_run_scan)
+    assert main(["scan", str(tmp_path), "--quiet", "--no-report"]) == 2
+    quiet = capsys.readouterr().out
+    assert "VIBEGUARD: PASS" not in quiet
+    assert "VIBEGUARD: ERROR 1 Layer-2 chunk(s) failed: chunk exploded" in quiet
+
+    assert main(["scan", str(tmp_path), "--no-report"]) == 2
+    full = capsys.readouterr().out
+    assert "VIBEGUARD: PASS" not in full
+    assert "ERROR" in full
+    assert "chunk exploded" in full
+
+
+def test_malformed_decision_response_fails_chunk() -> None:
+    class _BadAnswers:
+        def items(self):
+            raise RuntimeError("malformed answers")
+
+    async def respond(model, model_input, questions):
+        return SimpleNamespace(answers=_BadAnswers(), usage=None)
+
+    decisions = _RecordingDecisions(respond)
+    backend = GeminiDecisionBackend("k", client=_client(decisions), base_delay=0)
+    findings, stats = judge(
+        _ctx([_unit("x = 1\n")]),
+        backend,
+        DecisionCache(Path("unused"), enabled=False),
+    )
+    assert findings == []
+    assert any("malformed answers" in error for error in stats.errors)
+
+
+def test_cache_rejects_scores_outside_unit_interval(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    path = tmp_path / ".vibeguard_cache.json"
+    unit = _unit("x = 1\n")
+    scores = {rule_id: 0.2 for rule_id in LAYER2_RULE_IDS}
+    scores["D3.missing_auth"] = 5.0
+    key = cache_key(OFFLINE_MODEL, unit, "")
+    path.write_text(
+        json.dumps({"version": 1, "entries": {key: {"model": OFFLINE_MODEL, "scores": scores}}}),
+        encoding="utf-8",
+    )
+    cache = DecisionCache(path, model=OFFLINE_MODEL)
+    with caplog.at_level(logging.WARNING):
+        assert cache.get(unit, "") is None
+    assert "finite" in caplog.text.lower() or "[0, 1]" in caplog.text
+
+    scores["D3.missing_auth"] = 0.4
+    del scores["D4.idor_or_price_trust"]
+    path.write_text(
+        json.dumps({"version": 1, "entries": {key: {"model": OFFLINE_MODEL, "scores": scores}}}),
+        encoding="utf-8",
+    )
+    caplog.clear()
+    reloaded = DecisionCache(path, model=OFFLINE_MODEL)
+    with caplog.at_level(logging.WARNING):
+        assert reloaded.get(unit, "") is None
+    assert caplog.records
+
+
+def test_offline_cache_key_includes_heuristic_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    import vibeguard.offline_heuristics as heuristics
+
+    unit = _unit("x = 1\n")
+    before = cache_key(OFFLINE_MODEL, unit, "auth")
+    monkeypatch.setattr(heuristics, "OFFLINE_HEURISTIC_VERSION", OFFLINE_HEURISTIC_VERSION + "-next")
+    assert cache_key(OFFLINE_MODEL, unit, "auth") != before
+    gemini = question_set_version(GEMINI_MODEL)
+    monkeypatch.setattr(heuristics, "OFFLINE_HEURISTIC_VERSION", "unrelated")
+    assert question_set_version(GEMINI_MODEL) == gemini
+
+
+def test_quiet_help_mentions_pass_token(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["scan", "--help"]) == 0
+    assert "VIBEGUARD: PASS" in capsys.readouterr().out
+
+
+def test_parameter_named_args_is_not_taint_but_tool_params_are() -> None:
+    backend = OfflineHeuristicBackend()
+    git = _unit(
+        '''
+def _git(args):
+    return subprocess.run(["git", *args], check=False, capture_output=True)
+''',
+        name="_git",
+        kind="function",
+        http_method=None,
+        route_path=None,
+    )
+    assert _offline_scores(backend, git, "")["D5.prompt_injection"] < 0.2
+
+    tool = _unit(
+        '''
+@tool
+def run(command: str):
+    subprocess.run(command, shell=True, check=False)
+''',
+        name="run",
+        kind="tool",
+        http_method="TOOL",
+        route_path=None,
+    )
+    assert _offline_scores(backend, tool, "")["D5.prompt_injection"] >= 0.9
+
+    allowed = _unit(
+        '''
+@tool
+def notify(url: str, text: str):
+    if url not in ALLOWED_WEBHOOKS:
+        raise ValueError("url not allowed")
+    requests.post(url, json={"text": text}, timeout=5)
+''',
+        name="notify",
+        kind="tool",
+        http_method="TOOL",
+        route_path=None,
+    )
+    assert _offline_scores(backend, allowed, "")["D5.prompt_injection"] < 0.2
+
+
+def test_tool_arguments_passed_to_sink_helper_are_d5() -> None:
+    helper = _unit(
+        '''
+def page_bridge(target, msg):
+    return requests.post(target, json={"text": msg}, timeout=8)
+''',
+        name="page_bridge",
+        kind="function",
+        http_method=None,
+        route_path=None,
+        file="agent.py",
+    )
+    caller = _unit(
+        '''
+@app.post("/pages")
+def page(body: Note, operator_id: str = Depends(current_operator)):
+    calls = message.tool_calls or []
+    if calls:
+        page_bridge(calls[0].function.arguments, body.ticket)
+''',
+        name="page",
+        file="agent.py",
+    )
+    backend = OfflineHeuristicBackend()
+    backend.bind_catalog([helper, caller])
+    scores = _offline_scores(backend, caller, "")
+    assert scores["D5.prompt_injection"] >= 0.9
+    assert scores["D3.missing_auth"] < 0.2
+
+
+def test_generic_auth_and_resource_dependencies_and_rejection() -> None:
+    backend = OfflineHeuristicBackend()
+    clinician = _unit(
+        '''
+@app.post("/visits")
+def create(body: VisitIn, actor=Depends(current_clinician)):
+    db.execute("INSERT INTO visits (actor) VALUES (%s)", (actor,))
+'''
+    )
+    assert _offline_scores(backend, clinician, "")["D3.missing_auth"] < 0.2
+
+    database = _unit(
+        '''
+@app.post("/visits")
+def create(body: VisitIn, db=Depends(get_db)):
+    db.execute("INSERT INTO visits (name) VALUES (%s)", (body.name,))
+'''
+    )
+    assert _offline_scores(backend, database, "")["D3.missing_auth"] >= 0.9
+
+    settings_dep = _unit(
+        '''
+@app.post("/visits")
+def create(body: VisitIn, settings=Depends(get_settings)):
+    db.execute("INSERT INTO visits (name) VALUES (%s)", (body.name,))
+''',
+        file="app.py",
+    )
+    assert (
+        _offline_scores(
+            backend,
+            settings_dep,
+            "app.py:3: app = FastAPI(dependencies=[Depends(get_redis)])",
+        )["D3.missing_auth"]
+        >= 0.9
+    )
+    assert (
+        _offline_scores(
+            backend,
+            settings_dep,
+            "app.py:3: app = FastAPI(dependencies=[Depends(verify_api_key)])",
+        )["D3.missing_auth"]
+        < 0.2
+    )
+    unnamed = _unit(
+        '''
+@app.post("/receipts")
+def record(body: ScanIn):
+    db.execute("INSERT INTO receipts (code) VALUES (%s)", (body.code,))
+''',
+        file="gate.py",
+        route_path="/receipts",
+    )
+    assert (
+        _offline_scores(
+            backend,
+            unnamed,
+            "gate.py:4: FastAPI(dependencies=[Depends(verify_api_key)])",
+        )["D3.missing_auth"]
+        < 0.2
+    )
+    assert (
+        _offline_scores(
+            backend,
+            unnamed,
+            "gate.py:4: FastAPI(dependencies=[Depends(get_db)])",
+        )["D3.missing_auth"]
+        >= 0.9
+    )
+    other_file = _unit(unnamed.source, file="other.py", route_path="/receipts")
+    assert (
+        _offline_scores(
+            backend,
+            other_file,
+            "gate.py:4: FastAPI(dependencies=[Depends(verify_api_key)])",
+        )["D3.missing_auth"]
+        >= 0.9
+    )
+
+    header = _unit(
+        '''
+@app.post("/ops")
+def create(request: Request):
+    token = request.headers.get("x-ops-session")
+    if not token:
+        raise HTTPException(status_code=401, detail="sign in")
+    db.execute("INSERT INTO ops (token) VALUES (%s)", (token,))
+'''
+    )
+    assert _offline_scores(backend, header, "")["D3.missing_auth"] < 0.2
+
+    rejection = _unit(
+        """
+export async function POST(req: Request) {
+  const body = await req.json()
+  if (body.userId !== session.user.id) {
+    return NextResponse.json({ error: "no" }, { status: 403 })
+  }
+  await db.insert({ author_id: session.user.id, text: body.text })
+}
+""",
+        file="app/api/replies/route.ts",
+        language=Language.TYPESCRIPT,
+    )
+    assert _offline_scores(backend, rejection, "")["D4.idor_or_price_trust"] < 0.2
+
+
+def test_raw_payload_passed_to_database_scores_at_least_085() -> None:
+    backend = OfflineHeuristicBackend()
+    raw = _unit(
+        '''
+@app.post("/notes")
+async def create(request: Request, user=Depends(get_current_user)):
+    payload = await request.json()
+    db.execute("INSERT INTO notes (data) VALUES (%s)", (payload,))
+'''
+    )
+    assert _offline_scores(backend, raw, "")["D7b.missing_boundary_schema"] >= 0.85
+
+
+def test_offline_module_risk_bands() -> None:
+    import asyncio
+
+    backend = OfflineHeuristicBackend()
+    open_post = _unit(
+        '''
+@app.post("/orders")
+async def create_order(request: Request):
+    db.execute("INSERT INTO orders (sku) VALUES (%s)", ("sku",))
+'''
+    )
+    open_verdict = asyncio.run(backend.judge_chunk("", [open_post]))
+    assert open_verdict.severity[open_post.unit_id] == pytest.approx(2.0)
+
+    boundary = _unit(
+        '''
+@app.post("/notes")
+async def create(request: Request, user=Depends(get_current_user)):
+    payload = await request.json()
+    return {"echo": True}
+'''
+    )
+    boundary_verdict = asyncio.run(backend.judge_chunk("", [boundary]))
+    assert boundary_verdict.scores[boundary.unit_id]["D7b.missing_boundary_schema"] >= 0.6
+    assert boundary_verdict.scores[boundary.unit_id]["D7b.missing_boundary_schema"] < 0.85
+    assert boundary_verdict.severity[boundary.unit_id] == pytest.approx(1.0)
+
+    clean = _unit(
+        '''
+@app.post("/orders")
+async def create_order(order: OrderIn, user=Depends(get_current_user)):
+    price = catalog.price(order.sku)
+    supabase.table("orders").insert({"user_id": user.id, "amount": price}).execute()
+'''
+    )
+    clean_verdict = asyncio.run(backend.judge_chunk("", [clean]))
+    assert clean_verdict.severity[clean.unit_id] == pytest.approx(0.0)
+
+    findings, _stats = judge(
+        _ctx([open_post]),
+        backend,
+        DecisionCache(Path("unused"), enabled=False),
+    )
+    assert findings
+    assert all(finding.module_risk == pytest.approx(2.0) for finding in findings)
+
+
+def test_fix_excerpt_and_patch_are_redacted(tmp_path: Path) -> None:
+    from vibeguard.redact import redact_secrets
+
+    secret = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0K2"
+    assert secret not in redact_secrets(f'TOKEN = "{secret}"')
+    assert "supersecretvalue1234" not in redact_secrets(
+        "NEXT_PUBLIC_SECRET_TOKEN=supersecretvalue1234"
+    )
+
+    source = f'TOKEN = "{secret}"\n'
+    unit = _unit(source, name="load", kind="function", http_method=None, route_path=None, start_line=1)
+    ctx = ScanContext(root=tmp_path, files=[], units=[unit], auth_context="")
+    diff = (
+        "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n"
+        f'-TOKEN = "{secret}"\n'
+        "+TOKEN = os.environ['TOKEN']\n"
+    )
+    models = _FixModels(diff)
+    finding = Finding("D1.hardcoded_secret", "app.py", 1, "secret", symbol="load", snippet=source)
+    assert generate_fixes([finding], ctx, client=SimpleNamespace(aio=SimpleNamespace(models=models))) == 1
+    assert secret not in models.contents[0]
+    assert finding.fix_patch is not None and secret not in finding.fix_patch
+    assert "<redacted:" in finding.fix_patch
+
+
+def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
+    import os
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "trunk"], cwd=repo, check=True, capture_output=True)
+    (repo / "slop.py").write_text(
+        "def load():\n    try:\n        work()\n    except Exception:\n        pass\n",
+        encoding="utf-8",
+    )
+    hook = (
+        Path(__file__).resolve().parents[1]
+        / "integrations"
+        / "antigravity"
+        / "vibeguard"
+        / "scripts"
+        / "vibeguard-hook.sh"
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(Path(__file__).resolve().parents[1] / ".venv" / "bin") + os.pathsep + env.get("PATH", "")
+    env.pop("VIBEGUARD_FAIL_ON", None)
+    payload = json.dumps({"workspacePaths": [str(repo)]})
+
+    medium = subprocess.run(
+        ["bash", str(hook), "stop"],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )
+    assert medium.returncode == 0, medium.stderr
+    assert json.loads(medium.stdout) == {}
+
+    (repo / "slop.py").unlink()
+    token = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0"
+    (repo / "keys.py").write_text("TOKEN = " + repr(token) + "\n", encoding="utf-8")
+    critical = subprocess.run(
+        ["bash", str(hook), "stop"],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )
+    assert critical.returncode == 0, critical.stderr
+    blocked = json.loads(critical.stdout)
+    assert blocked["decision"] == "continue"
+    assert "CRITICAL" in blocked["reason"]

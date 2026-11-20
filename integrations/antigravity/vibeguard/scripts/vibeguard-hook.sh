@@ -4,15 +4,16 @@
 # Stop (end of turn): run `vibeguard scan . --diff <base> --quiet`.
 #   base is $VIBEGUARD_BASE, default main. If that ref is missing, or this
 #   directory is not a git work tree, scan the whole tree.
+#   Blocking uses --fail-on ${VIBEGUARD_FAIL_ON:-critical}.
 # PostToolUse (file edits): the same scan with `--mode off` (Layer 1 only).
 #
 # Blocking follows the Antigravity hook contract:
 #   Command hooks must exit 0 and write a JSON object to stdout.
-#   Stop blocks with {"decision":"continue","reason":"..."} and allows the
-#   stop with {}. A non-zero exit is logged and ignored (fail open), so a
-#   finding must not be signaled with exit 1.
+#   Stop blocks only when vibeguard exits 1, with
+#   {"decision":"continue","reason":"..."} (the reason includes the findings).
+#   Exit 0 allows the stop with {}, even when lower-severity findings printed.
+#   Exit 2 (scanner or API error) fails open: {} on stdout and the error on stderr.
 #   PostToolUse cannot block; it returns {} and audits on stderr.
-# A clean scan prints nothing into the agent context (stdout is {} only).
 
 set -euo pipefail
 
@@ -108,7 +109,8 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
-cmd=(vibeguard scan . --quiet --no-report --no-cache)
+fail_on="${VIBEGUARD_FAIL_ON:-critical}"
+cmd=(vibeguard scan . --quiet --no-report --no-cache --fail-on "$fail_on")
 if [ "$event" = "post-tool" ]; then
   cmd+=(--mode off)
 fi
@@ -123,25 +125,18 @@ output="$(COLUMNS=1000 LINES=40 NO_COLOR=1 "${cmd[@]}" 2>"$err_file")"
 code=$?
 set -e
 
-# Quiet mode prints exactly "VIBEGUARD: PASS" when the tree is clean, even if
-# every finding is below the CLI's default --fail-on high (exit 0). Any other
-# report is a finding the agent still has to fix.
 body="$(printf '%s' "$output" | tr -d '\r')"
 body="${body#"${body%%[![:space:]]*}"}"
 body="${body%"${body##*[![:space:]]}"}"
-clean=0
-if [ "$code" -eq 0 ] && { [ -z "$body" ] || [ "$body" = "VIBEGUARD: PASS" ]; }; then
-  clean=1
-fi
 
 if [ "$code" -eq 2 ] || [ "$code" -gt 2 ]; then
   err_text="$(cat "$err_file" 2>/dev/null || true)"
-  echo "VibeGuard scan error (exit ${code}): ${err_text:-unknown error}" >&2
+  echo "VibeGuard scan error (exit ${code}): ${body:-${err_text:-unknown error}}" >&2
   printf '%s\n' '{}'
-  exit 2
+  exit 0
 fi
 
-if [ "$clean" -eq 1 ]; then
+if [ "$code" -ne 1 ]; then
   printf '%s\n' '{}'
   exit 0
 fi

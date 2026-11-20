@@ -12,6 +12,7 @@ from pathlib import Path
 from rich.console import Console
 
 from vibeguard import __version__
+from vibeguard.collector import CollectorError
 from vibeguard.decision_judge import DecisionAPIError
 from vibeguard.models import DEFAULT_THRESHOLD, Finding
 from vibeguard.pipeline import run_scan
@@ -56,7 +57,6 @@ def _main(argv: list[str]) -> int:
         print("error: pass only one of --report and --no-report", file=sys.stderr)
         return 2
     root = Path(args.path).expanduser().resolve()
-    collector_errors = _collector_error_types()
     try:
         result, _ctx = run_scan(
             root,
@@ -66,14 +66,9 @@ def _main(argv: list[str]) -> int:
             use_cache=not args.no_cache,
             fix=args.fix,
         )
-    except DecisionAPIError as exc:
+    except (DecisionAPIError, CollectorError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:
-        if collector_errors and isinstance(exc, collector_errors):
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        raise
     report_explicit = args.report is not None
     write_report = not args.no_report and (report_explicit or not args.quiet)
     try:
@@ -89,7 +84,9 @@ def _main(argv: list[str]) -> int:
         json.dump(to_json(result), sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
-        render_terminal(result, Console(highlight=False), quiet=args.quiet)
+        render_terminal(result, Console(highlight=False, soft_wrap=args.quiet), quiet=args.quiet)
+    if result.judge.errors:
+        return 2
     if _should_fail(result.findings, args.fail_on):
         return 1
     return 0
@@ -108,7 +105,11 @@ def _build_parser() -> _Parser:
     scan.add_argument("--no-report", action="store_true", help="do not write VIBEGUARD_REPORT.md")
     scan.add_argument("--sarif", default=None, metavar="PATH")
     scan.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
-    scan.add_argument("--quiet", action="store_true", help="silent on pass; one line per finding otherwise")
+    scan.add_argument(
+        "--quiet",
+        action="store_true",
+        help="print only 'VIBEGUARD: PASS' on pass; one line per finding otherwise",
+    )
     scan.add_argument(
         "--fail-on",
         choices=("critical", "high", "medium", "low", "none"),
@@ -118,16 +119,6 @@ def _build_parser() -> _Parser:
     scan.add_argument("--no-cache", action="store_true")
     sub.add_parser("version", help="print the version")
     return parser
-
-
-def _collector_error_types() -> tuple[type[BaseException], ...]:
-    try:
-        from vibeguard.collector import CollectorError
-    except ImportError:
-        return ()
-    if isinstance(CollectorError, type) and issubclass(CollectorError, BaseException):
-        return (CollectorError,)
-    return ()
 
 
 def _should_fail(findings: list[Finding], fail_on: str) -> bool:

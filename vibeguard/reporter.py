@@ -12,6 +12,7 @@ from rich.text import Text
 
 from vibeguard import __version__
 from vibeguard.models import RULES, Category, Finding, ScanResult, Severity
+from vibeguard.redact import redact_secrets
 
 INPUT_USD_PER_MILLION = 0.10
 _PENALTY = {
@@ -20,9 +21,7 @@ _PENALTY = {
     Severity.MEDIUM: 8,
     Severity.LOW: 3,
 }
-_SARIF_SCHEMA = (
-    "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
-)
+_SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
 _INFO_URI = "https://github.com/vibeguard/vibeguard"
 _SEVERITY_ORDER = (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW)
 
@@ -81,19 +80,28 @@ def render_terminal(result: ScanResult, console: Console, quiet: bool = False) -
 
 
 def _render_quiet(result: ScanResult, console: Console) -> None:
+    if result.judge.errors:
+        for finding in result.findings:
+            console.print(_compact_line(finding), markup=False, highlight=False)
+        console.print(_quiet_error(result), markup=False, highlight=False)
+        return
     if not result.findings:
         console.print("VIBEGUARD: PASS", markup=False, highlight=False)
         return
     for finding in result.findings:
         console.print(_compact_line(finding), markup=False, highlight=False)
     security, slop = compute_scores(result.findings)
-    summary = (
-        f"VIBEGUARD: FAIL findings={len(result.findings)} "
-        f"security={security} slop={slop}"
+    console.print(
+        f"VIBEGUARD: FAIL findings={len(result.findings)} security={security} slop={slop}",
+        markup=False,
+        highlight=False,
     )
-    if result.judge.errors:
-        summary += f" errors={len(result.judge.errors)}"
-    console.print(summary, markup=False, highlight=False)
+
+
+def _quiet_error(result: ScanResult) -> str:
+    count = len(result.judge.errors)
+    detail = "; ".join(result.judge.errors)
+    return f"VIBEGUARD: ERROR {count} Layer-2 chunk(s) failed: {detail}"
 
 
 def _render_full(result: ScanResult, console: Console) -> None:
@@ -110,32 +118,39 @@ def _render_full(result: ScanResult, console: Console) -> None:
         f"input tokens: {judge.input_tokens}  "
         f"estimated cost: ${cost:.6f} ($0.10/1M)"
     )
-    for error in judge.errors:
-        warning = Text()
-        warning.append("warning: ", style="yellow")
-        warning.append(error)
-        console.print(warning)
-    table = Table(title="Findings", show_lines=False)
-    table.add_column("Severity", no_wrap=True)
-    table.add_column("Rule", no_wrap=True)
-    table.add_column("Location", no_wrap=True)
-    table.add_column("Prob", justify="right", no_wrap=True)
-    table.add_column("Message", overflow="fold")
-    for finding in result.findings:
-        prob = "-" if finding.probability is None else f"{finding.probability:.2f}"
-        table.add_row(
-            Text(finding.severity.value, style=_severity_style(finding.severity)),
-            finding.rule_id,
-            f"{finding.file}:{finding.line}",
-            prob,
-            Text(finding.message),
+    if judge.errors:
+        console.print(
+            f"[bold red]ERROR[/bold red] {len(judge.errors)} Layer-2 chunk(s) failed"
         )
-    console.print(table)
+        for error in judge.errors:
+            line = Text()
+            line.append("ERROR: ", style="bold red")
+            line.append(error)
+            console.print(line)
+    if result.findings:
+        console.print(_findings_table(result.findings))
+    else:
+        console.print("[bold green]PASS[/bold green] no findings")
     skipped = judge.units_skipped_layer1
     console.print(
         f"{len(result.findings)} finding(s) in {result.duration_s:.2f}s"
         + (f"  skipped {skipped} unit(s) after layer 1" if skipped else "")
     )
+
+
+def _findings_table(findings: list[Finding]) -> Table:
+    table = Table(title="Findings", show_lines=True, expand=True)
+    table.add_column("Severity", no_wrap=True)
+    table.add_column("Prob", justify="right", no_wrap=True)
+    table.add_column("Finding", overflow="fold", ratio=1)
+    for finding in findings:
+        prob = "exact" if finding.probability is None else f"{finding.probability:.2f}"
+        detail = Text()
+        detail.append(finding.rule_id, style="bold")
+        detail.append(f"  {finding.file}:{finding.line}\n", style="cyan")
+        detail.append(finding.message)
+        table.add_row(Text(finding.severity.value, style=_severity_style(finding.severity)), prob, detail)
+    return table
 
 
 def _severity_style(severity: Severity) -> str:
@@ -189,13 +204,19 @@ def to_markdown(result: ScanResult) -> str:
             continue
         lines.append(f"### {severity.value}")
         lines.append("")
-        lines.append("| Rule | Location | Prob | Message |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Rule | Location | Prob | Risk | Message |")
+        lines.append("| --- | --- | --- | --- | --- |")
         for finding in items:
             prob = "" if finding.probability is None else f"{finding.probability:.2f}"
             location = f"{finding.file}:{finding.line}"
             lines.append(
-                f"| {finding.rule_id} | {_md_cell(location)} | {prob} | {_md_cell(finding.message)} |"
+                "| {rule} | {location} | {prob} | {risk} | {message} |".format(
+                    rule=finding.rule_id,
+                    location=_md_cell(location),
+                    prob=prob,
+                    risk=_risk_cell(finding),
+                    message=_md_cell(finding.message),
+                )
             )
         lines.append("")
         seen: set[str] = set()
@@ -211,7 +232,7 @@ def to_markdown(result: ScanResult) -> str:
             lines.append(f"#### {finding.file}:{finding.line} {finding.rule_id}")
             lines.append("")
             lines.append("```diff")
-            lines.append(finding.fix_patch.strip("\n"))
+            lines.append(redact_secrets(finding.fix_patch).strip("\n"))
             lines.append("```")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -219,6 +240,12 @@ def to_markdown(result: ScanResult) -> str:
 
 def _md_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _risk_cell(finding: Finding) -> str:
+    if finding.module_risk is None:
+        return ""
+    return f"{finding.module_risk:.2f}"
 
 
 def write_markdown(result: ScanResult, path: Path | str) -> None:
@@ -245,7 +272,11 @@ def to_sarif(result: ScanResult) -> dict[str, Any]:
                         }
                     }
                 ],
-                "properties": {"probability": finding.probability, "layer": finding.layer},
+                "properties": {
+                    "probability": finding.probability,
+                    "layer": finding.layer,
+                    "module_risk": finding.module_risk,
+                },
             }
         )
     return {
@@ -349,5 +380,6 @@ def _finding_json(finding: Finding) -> dict[str, Any]:
         "layer": finding.layer,
         "detector": finding.detector,
         "snippet": finding.snippet,
-        "fix_patch": finding.fix_patch,
+        "fix_patch": redact_secrets(finding.fix_patch) if finding.fix_patch else None,
+        "module_risk": finding.module_risk,
     }
