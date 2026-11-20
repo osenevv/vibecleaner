@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibeguard"
+version = "0.1.0"
+description = "Pre-ship security & anti-slop harness for AI-generated apps (tree-sitter gate + gemini-decision-1 atomic checks)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Vladimir Osenev" }]
+dependencies = [
+    "tree-sitter>=0.23,<0.27",
+    "tree-sitter-python>=0.23,<0.26",
+    "tree-sitter-typescript>=0.23,<0.24",
+    "pathspec>=0.12",
+    "google-genai>=3.2",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+vibeguard = "vibeguard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vibeguard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
