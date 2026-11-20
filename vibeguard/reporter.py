@@ -114,10 +114,9 @@ def _render_full(result: ScanResult, console: Console) -> None:
     console.print(
         f"files scanned: {result.files_scanned}  "
         f"units judged: {judge.units_judged}  "
-        f"cache hits: {judge.cache_hits}  "
-        f"input tokens: {judge.input_tokens}  "
-        f"estimated cost: ${cost:.6f} ($0.10/1M)"
+        f"cache hits: {judge.cache_hits}"
     )
+    console.print(f"input tokens: {judge.input_tokens}  estimated cost: ${cost:.6f} ($0.10/1M)")
     if judge.errors:
         console.print(
             f"[bold red]ERROR[/bold red] {len(judge.errors)} Layer-2 chunk(s) failed"
