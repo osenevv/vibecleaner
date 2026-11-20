@@ -1,0 +1,24 @@
+name: VibeGuard example
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Required. VibeGuard diffs against origin/<base branch>.
+          # The composite action also runs: git fetch --no-tags origin <base ref>
+          fetch-depth: 0
+
+      - name: VibeGuard
+        uses: ./
+        with:
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}

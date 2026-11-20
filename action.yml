@@ -1,0 +1,162 @@
+name: VibeGuard
+description: >-
+  Scan a repository for security holes and AI-generated code slop.
+  On pull_request, an empty diff-base scans origin/<base ref>; otherwise
+  an empty diff-base is a full scan. Checkout must use fetch-depth: 0.
+
+inputs:
+  path:
+    description: Directory to scan
+    required: false
+    default: "."
+  diff-base:
+    description: >-
+      Git ref passed to vibeguard --diff. Empty on pull_request means
+      origin/${{ github.base_ref }}; empty on any other event means a full scan.
+    required: false
+    default: ""
+  mode:
+    description: "Scan mode: auto, live, offline, or off"
+    required: false
+    default: auto
+  threshold:
+    description: Layer 2 probability threshold (0 through 1)
+    required: false
+    default: "0.75"
+  fail-on:
+    description: "Fail when a finding is at or above this severity: critical, high, medium, low, or none"
+    required: false
+    default: high
+  sarif:
+    description: SARIF output path
+    required: false
+    default: vibeguard.sarif
+  gemini-api-key:
+    description: >-
+      Optional Gemini API key. Exported as GEMINI_API_KEY only when non-empty.
+      auto mode uses the offline heuristic when no key is set.
+    required: false
+    default: ""
+  python-version:
+    description: Python version for actions/setup-python
+    required: false
+    default: "3.12"
+  upload-sarif:
+    description: Upload the SARIF file with github/codeql-action/upload-sarif when true
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: vibeguard process exit code (0 pass, 1 findings, 2 error)
+    value: ${{ steps.scan.outputs.exit_code }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install VibeGuard
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: pip install "$ACTION_PATH"
+
+    - name: Fetch pull request base
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        # actions/checkout must use fetch-depth: 0 so origin/$BASE_REF exists.
+        # This fetch is the fallback when that base commit was not downloaded.
+        if [ -z "$BASE_REF" ]; then
+          echo "pull_request event is missing github.base_ref" >&2
+          exit 2
+        fi
+        git fetch --no-tags origin "$BASE_REF"
+
+    - name: Run VibeGuard
+      id: scan
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_DIFF_BASE: ${{ inputs.diff-base }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_THRESHOLD: ${{ inputs.threshold }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "$INPUT_GEMINI_API_KEY" ]; then
+          export GEMINI_API_KEY="$INPUT_GEMINI_API_KEY"
+        fi
+        args=(
+          scan
+          "$INPUT_PATH"
+          --mode "$INPUT_MODE"
+          --threshold "$INPUT_THRESHOLD"
+          --fail-on "$INPUT_FAIL_ON"
+          --sarif "$INPUT_SARIF"
+          --report VIBEGUARD_REPORT.md
+        )
+        diff_base="$INPUT_DIFF_BASE"
+        if [ -z "$diff_base" ] && [ "$EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+          diff_base="origin/${BASE_REF}"
+        fi
+        if [ -n "$diff_base" ]; then
+          args+=(--diff "$diff_base")
+        fi
+        set +e
+        vibeguard "${args[@]}"
+        code=$?
+        set -e
+        printf 'exit_code=%s\n' "$code" >> "$GITHUB_OUTPUT"
+        if [ -n "${RUNNER_TEMP:-}" ]; then
+          printf '%s\n' "$code" > "$RUNNER_TEMP/vibeguard-exit-code"
+        fi
+        if [ -f VIBEGUARD_REPORT.md ]; then
+          {
+            printf '\n'
+            cat VIBEGUARD_REPORT.md
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit 0
+
+    - name: Upload SARIF
+      if: always() && inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      continue-on-error: true
+      with:
+        sarif_file: ${{ inputs.sarif }}
+
+    - name: Enforce VibeGuard result
+      if: always()
+      shell: bash
+      env:
+        SCAN_EXIT: ${{ steps.scan.outputs.exit_code }}
+      run: |
+        set -euo pipefail
+        code="${SCAN_EXIT}"
+        if [ -z "$code" ] && [ -n "${RUNNER_TEMP:-}" ] && [ -f "$RUNNER_TEMP/vibeguard-exit-code" ]; then
+          code="$(cat "$RUNNER_TEMP/vibeguard-exit-code")"
+        fi
+        case "$code" in
+          0)
+            exit 0
+            ;;
+          1|2)
+            echo "VibeGuard exited ${code}" >&2
+            exit "$code"
+            ;;
+          *)
+            echo "VibeGuard did not report a pass (exit ${code:-unset})" >&2
+            exit 2
+            ;;
+        esac

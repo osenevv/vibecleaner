@@ -1,0 +1,17 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "vibeguard",
+  "displayName": "VibeGuard",
+  "version": "0.1.0",
+  "description": "Scans AI-generated code for security holes and slop with deterministic checks plus Layer 2, and blocks the agent from finishing while findings remain.",
+  "suggestedPrompts": [
+    "Audit this branch with VibeGuard and fix every finding",
+    "Run vibeguard scan --diff main and walk me through VIBEGUARD_REPORT.md",
+    "Fix the critical VibeGuard findings, using --fix only as a draft"
+  ],
+  "author": {
+    "name": "Vladimir Osenev"
+  },
+  "license": "MIT",
+  "keywords": ["security", "slop", "audit", "vibeguard"]
+}
