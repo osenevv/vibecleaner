@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from gitutil import init_git
 from rich.console import Console
 
 from vibeguard.cache import (
@@ -850,68 +855,43 @@ def test_pipeline_module_exposes_run_scan() -> None:
     assert callable(run_scan)
 
 
-def _patched_scan(monkeypatch: pytest.MonkeyPatch, findings: list[Finding], sink: dict | None = None):
-    def fake_run_scan(root, diff_base=None, mode="auto", threshold=0.75, use_cache=True, fix=False):
-        if sink is not None:
-            sink.update(
-                {
-                    "root": root,
-                    "diff_base": diff_base,
-                    "mode": mode,
-                    "threshold": threshold,
-                    "use_cache": use_cache,
-                    "fix": fix,
-                }
-            )
-        ctx = ScanContext(root=Path(root), files=[], units=[], auth_context="")
-        result = ScanResult(
-            root=Path(root),
-            findings=list(findings),
-            files_scanned=1,
-            judge=JudgeStats(mode="offline"),
-            duration_s=0.01,
-        )
-        return result, ctx
+def test_cli_exit_codes_quiet_json_and_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clean_repo = tmp_path / "clean"
+    clean_repo.mkdir()
+    (clean_repo / "app.py").write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
 
-    monkeypatch.setattr("vibeguard.cli.run_scan", fake_run_scan)
-
-
-def test_cli_exit_codes_quiet_json_and_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    _patched_scan(monkeypatch, [])
-    assert main(["scan", str(tmp_path), "--no-report", "--mode", "offline"]) == 0
+    assert main(["scan", str(clean_repo), "--no-report", "--mode", "offline"]) == 0
     assert "VibeGuard" in capsys.readouterr().out
-    assert not (tmp_path / "VIBEGUARD_REPORT.md").exists()
+    assert not (clean_repo / "VIBEGUARD_REPORT.md").exists()
 
-    _patched_scan(monkeypatch, [])
-    assert main(["scan", str(tmp_path), "--quiet", "--mode", "off"]) == 0
+    assert main(["scan", str(clean_repo), "--quiet", "--mode", "off"]) == 0
     assert capsys.readouterr().out.strip() == "VIBEGUARD: PASS"
-    assert not (tmp_path / "VIBEGUARD_REPORT.md").exists()
+    assert not (clean_repo / "VIBEGUARD_REPORT.md").exists()
 
     report = tmp_path / "custom.md"
-    _patched_scan(monkeypatch, [])
-    assert main(["scan", str(tmp_path), "--quiet", "--report", str(report)]) == 0
+    assert main(["scan", str(clean_repo), "--quiet", "--report", str(report), "--mode", "offline"]) == 0
     assert report.is_file()
     assert report.read_text(encoding="utf-8").startswith("# VibeGuard report")
     capsys.readouterr()
 
-    critical = Finding("D1.hardcoded_secret", "a.py", 1, "secret")
-    _patched_scan(monkeypatch, [critical])
-    assert main(["scan", str(tmp_path), "--quiet", "--no-report"]) == 1
+    crit_repo = tmp_path / "crit"
+    crit_repo.mkdir()
+    fake_key = "sk_" + "live_" + "0123456789abcdef01234567"
+    (crit_repo / "a.py").write_text(f'STRIPE_KEY = "{fake_key}"\n', encoding="utf-8")
+
+    assert main(["scan", str(crit_repo), "--quiet", "--no-report", "--mode", "offline"]) == 1
     quiet_out = capsys.readouterr().out
     assert quiet_out.startswith("CRITICAL D1.hardcoded_secret a.py:1 (p=1.00) ")
     assert "VIBEGUARD: FAIL" in quiet_out
 
-    low = Finding("D6a.passthrough_wrapper", "a.py", 2, "wrap")
-    _patched_scan(monkeypatch, [low])
-    assert main(["scan", str(tmp_path), "--quiet", "--no-report"]) == 0
-    _patched_scan(monkeypatch, [low])
-    assert main(["scan", str(tmp_path), "--quiet", "--no-report", "--fail-on", "low"]) == 1
-    _patched_scan(monkeypatch, [critical])
-    assert main(["scan", str(tmp_path), "--quiet", "--no-report", "--fail-on", "none"]) == 0
-
+    assert main(["scan", str(crit_repo), "--quiet", "--no-report", "--mode", "offline", "--fail-on", "none"]) == 0
     capsys.readouterr()
-    _patched_scan(monkeypatch, [critical])
-    assert main(["scan", str(tmp_path), "--json", "--no-report", "--quiet"]) == 1
+
+    assert main(["scan", str(crit_repo), "--json", "--no-report", "--quiet", "--mode", "offline"]) == 1
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["findings"][0]["rule_id"] == "D1.hardcoded_secret"
@@ -919,25 +899,41 @@ def test_cli_exit_codes_quiet_json_and_flags(tmp_path: Path, monkeypatch: pytest
     assert "VIBEGUARD" not in captured.out
     assert "Traceback" not in captured.err
 
-    def explode(*_args, **_kwargs):
-        raise DecisionAPIError("mode 'live' requires GEMINI_API_KEY or GOOGLE_API_KEY")
+    low_repo = tmp_path / "low"
+    low_repo.mkdir()
+    (low_repo / "b.py").write_text(
+        "def target(x: int) -> int:\n"
+        "    return x + 1\n\n"
+        "def wrap(*args, **kwargs):\n"
+        "    return target(*args, **kwargs)\n",
+        encoding="utf-8",
+    )
+    assert main(["scan", str(low_repo), "--quiet", "--no-report", "--mode", "offline"]) == 0
+    assert main(["scan", str(low_repo), "--quiet", "--no-report", "--mode", "offline", "--fail-on", "low"]) == 1
+    capsys.readouterr()
 
-    monkeypatch.setattr("vibeguard.cli.run_scan", explode)
-    assert main(["scan", str(tmp_path), "--no-report"]) == 2
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    assert main(["scan", str(clean_repo), "--mode", "live", "--no-report"]) == 2
     error_out = capsys.readouterr()
     assert "GEMINI_API_KEY" in error_out.err
     assert "Traceback" not in error_out.err
 
-    sink: dict = {}
-    _patched_scan(monkeypatch, [], sink)
+    diff_repo = tmp_path / "diff_repo"
+    diff_repo.mkdir()
+    init_git(diff_repo)
+    (diff_repo / "old_bad.py").write_text(f'STRIPE_KEY = "{fake_key}"\n', encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=diff_repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=diff_repo, check=True)
+    (diff_repo / "new_clean.py").write_text("VALUE = 42\n", encoding="utf-8")
+
     assert (
         main(
             [
                 "scan",
-                str(tmp_path),
+                str(diff_repo),
                 "--diff",
-                "origin/main",
-                "--fix",
+                "HEAD",
                 "--mode",
                 "offline",
                 "--threshold",
@@ -949,19 +945,14 @@ def test_cli_exit_codes_quiet_json_and_flags(tmp_path: Path, monkeypatch: pytest
         )
         == 0
     )
-    assert sink["diff_base"] == "origin/main"
-    assert sink["fix"] is True
-    assert sink["mode"] == "offline"
-    assert sink["threshold"] == 0.5
-    assert sink["use_cache"] is False
-    assert Path(sink["root"]) == tmp_path.resolve()
+    assert not (diff_repo / ".vibeguard_cache.json").exists()
     capsys.readouterr()
 
     assert main(["version"]) == 0
     assert capsys.readouterr().out.strip() == "0.1.0"
     assert main(["nope"]) == 2
-    assert main(["scan", str(tmp_path), "--threshold", "2", "--no-report"]) == 2
-    assert main(["scan", str(tmp_path), "--report", str(report), "--no-report"]) == 2
+    assert main(["scan", str(clean_repo), "--threshold", "2", "--no-report"]) == 2
+    assert main(["scan", str(clean_repo), "--report", str(report), "--no-report"]) == 2
 
 
 def test_offline_auth_trust_prompt_and_stub_heuristics() -> None:
@@ -1434,28 +1425,54 @@ def test_judge_errors_exit_2_and_quiet_never_passes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def fake_run_scan(root, diff_base=None, mode="auto", threshold=0.75, use_cache=True, fix=False):
-        ctx = ScanContext(root=Path(root), files=[], units=[], auth_context="")
-        result = ScanResult(
-            root=Path(root),
-            findings=[Finding("D7b.missing_boundary_schema", "a.py", 3, "raw", probability=0.8)],
-            files_scanned=1,
-            judge=JudgeStats(mode="offline", errors=["chunk exploded"]),
-            duration_s=0.01,
-        )
-        return result, ctx
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    monkeypatch.setattr("vibeguard.cli.run_scan", fake_run_scan)
-    assert main(["scan", str(tmp_path), "--quiet", "--no-report"]) == 2
-    quiet = capsys.readouterr().out
-    assert "VIBEGUARD: PASS" not in quiet
-    assert "VIBEGUARD: ERROR 1 Layer-2 chunk(s) failed: chunk exploded" in quiet
+    class _ErrorHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = b'{"error":{"code":400,"message":"chunk exploded","status":"INVALID_ARGUMENT"}}'
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-    assert main(["scan", str(tmp_path), "--no-report"]) == 2
-    full = capsys.readouterr().out
-    assert "VIBEGUARD: PASS" not in full
-    assert "ERROR" in full
-    assert "chunk exploded" in full
+        def log_message(self, format: str, *args: object) -> None:
+            return None
+
+    (tmp_path / "app.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.post('/pay')\n"
+        "def pay(body: dict):\n"
+        "    return body\n",
+        encoding="utf-8",
+    )
+
+    server = HTTPServer(("127.0.0.1", 0), _ErrorHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    try:
+        assert main(["scan", str(tmp_path), "--mode", "live", "--quiet", "--no-report", "--no-cache"]) == 2
+        quiet = capsys.readouterr().out
+        assert "VIBEGUARD: PASS" not in quiet
+        assert "VIBEGUARD: ERROR 1 Layer-2 chunk(s) failed:" in quiet
+        assert "chunk exploded" in quiet
+
+        assert main(["scan", str(tmp_path), "--mode", "live", "--no-report", "--no-cache"]) == 2
+        full = capsys.readouterr().out
+        assert "VIBEGUARD: PASS" not in full
+        assert "ERROR" in full
+        assert "chunk exploded" in full
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_malformed_decision_response_fails_chunk() -> None:
@@ -1861,12 +1878,9 @@ def test_fix_excerpt_and_patch_are_redacted(tmp_path: Path) -> None:
 
 
 def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
-    import os
-    import subprocess
-
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-b", "trunk"], cwd=repo, check=True, capture_output=True)
+    init_git(repo, branch="trunk")
     (repo / "slop.py").write_text(
         "def load():\n    try:\n        work()\n    except Exception:\n        pass\n",
         encoding="utf-8",
@@ -1880,7 +1894,13 @@ def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
         / "vibeguard-hook.sh"
     )
     env = os.environ.copy()
-    env["PATH"] = str(Path(__file__).resolve().parents[1] / ".venv" / "bin") + os.pathsep + env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(
+        [
+            str(Path(sys.executable).resolve().parent),
+            str(Path(__file__).resolve().parents[1] / ".venv" / "bin"),
+            env.get("PATH", ""),
+        ]
+    )
     env.pop("VIBEGUARD_FAIL_ON", None)
     payload = json.dumps({"workspacePaths": [str(repo)]})
 
@@ -1910,6 +1930,127 @@ def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
     blocked = json.loads(critical.stdout)
     assert blocked["decision"] == "continue"
     assert "CRITICAL" in blocked["reason"]
+
+
+def test_build_payload_and_layer2_snippets_redact_secrets() -> None:
+    secret_a = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0K2"
+    secret_b = "sk-" + "proj-" + "Z9y8X7w6V5u4T3s2R1q0P9"
+    auth_ctx = f'AUTH_TOKEN = "{secret_a}"'
+    source = f'TOKEN = "{secret_b}"\ndef create():\n    return TOKEN\n'
+    unit = _unit(source, name="create_order")
+    chunk_units([unit], auth_ctx, max_tokens=10**9, max_modules=10)
+
+    payload = build_payload(auth_ctx, [unit])
+    assert secret_a not in payload["input"]
+    assert secret_b not in payload["input"]
+    assert "<redacted:" in payload["input"]
+
+    scores = {
+        rule_id: (0.95 if rule_id == "D3.missing_auth" else 0.05)
+        for rule_id in LAYER2_RULE_IDS
+    }
+    findings, stats = judge(
+        _ctx([unit], auth=auth_ctx),
+        _FixedBackend(scores),
+        DecisionCache(Path("unused"), enabled=False),
+    )
+    assert not stats.errors
+    assert len(findings) == 1
+    assert secret_b not in findings[0].snippet
+    assert "<redacted:" in findings[0].snippet
+
+
+def test_antigravity_hook_fails_closed_on_exit_2_broken_rules(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git(repo, branch="trunk")
+    (repo / ".vibeguard").mkdir()
+    (repo / ".vibeguard" / "rules.json").write_text("{", encoding="utf-8")
+    hook = (
+        Path(__file__).resolve().parents[1]
+        / "integrations"
+        / "antigravity"
+        / "vibeguard"
+        / "scripts"
+        / "vibeguard-hook.sh"
+    )
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join(
+        [
+            str(Path(sys.executable).resolve().parent),
+            str(Path(__file__).resolve().parents[1] / ".venv" / "bin"),
+            env.get("PATH", ""),
+        ]
+    )
+    payload = json.dumps({"workspacePaths": [str(repo)]})
+
+    stop_run = subprocess.run(
+        ["bash", str(hook), "stop"],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )
+    assert stop_run.returncode == 0, stop_run.stderr
+    stop_data = json.loads(stop_run.stdout)
+    assert stop_data["decision"] == "continue"
+    assert "exit 2" in stop_data["reason"]
+
+    post_run = subprocess.run(
+        ["bash", str(hook), "post-tool"],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )
+    assert post_run.returncode == 0, post_run.stderr
+    assert json.loads(post_run.stdout) == {}
+
+
+def test_antigravity_hook_fails_closed_when_vibeguard_missing(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(Path(sys.executable).resolve())
+    hook = (
+        Path(__file__).resolve().parents[1]
+        / "integrations"
+        / "antigravity"
+        / "vibeguard"
+        / "scripts"
+        / "vibeguard-hook.sh"
+    )
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"])
+    assert shutil.which("vibeguard", path=env["PATH"]) is None
+    payload = json.dumps({"workspacePaths": [str(repo)]})
+
+    stop_run = subprocess.run(
+        ["bash", str(hook), "stop"],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )
+    assert stop_run.returncode == 0, stop_run.stderr
+    stop_data = json.loads(stop_run.stdout)
+    assert stop_data["decision"] == "continue"
+    assert "not on PATH" in stop_data["reason"]
+
+    post_run = subprocess.run(
+        ["bash", str(hook), "post-tool"],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=repo,
+    )
+    assert post_run.returncode == 0, post_run.stderr
+    assert json.loads(post_run.stdout) == {}
 
 
 def _auth_score(source: str, auth: str = "", **overrides: object) -> float:

@@ -1,0 +1,20 @@
+{
+  "name": "vibeguard",
+  "version": "0.1.0",
+  "description": "Runs VibeGuard from Codex so the repository is ready to ship.",
+  "author": {
+    "name": "Vladimir Osenev"
+  },
+  "license": "MIT",
+  "keywords": ["security", "slop", "audit", "vibeguard"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "VibeGuard",
+    "shortDescription": "Ship-ready scan and fix for agent code.",
+    "developerName": "Vladimir Osenev",
+    "category": "Productivity",
+    "defaultPrompt": [
+      "Run VibeGuard and relay what it prints."
+    ]
+  }
+}

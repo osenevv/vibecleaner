@@ -13,9 +13,26 @@ from dataclasses import dataclass, field
 from tree_sitter import Node
 
 from vibeguard.models import Finding, Language, SourceFile
-from vibeguard.ts_parse import node_text, parser_for, walk_tree
+from vibeguard.ts_parse import node_text, parse_root, walk_tree
 
 _CODE = frozenset({Language.PYTHON, Language.TYPESCRIPT, Language.TSX, Language.JAVASCRIPT})
+_CALL_TYPES = frozenset({"call", "call_expression"})
+_FN_TYPES = frozenset({
+    "function_definition",
+    "function_declaration",
+    "method_definition",
+    "arrow_function",
+})
+_NESTED_TYPES = _FN_TYPES | {"lambda"}
+_LOOP_TYPES = frozenset({"while_statement", "for_statement"})
+_EXIT_TYPES = frozenset({
+    "break_statement",
+    "return_statement",
+    "raise_statement",
+    "throw_statement",
+})
+_ACQUIRE_NAMES = frozenset({"acquire", "lock"})
+_RELEASE_NAMES = frozenset({"release", "unlock"})
 
 
 @dataclass
@@ -125,10 +142,9 @@ def _render_machine(machine: Machine) -> list[str]:
 
 
 def _root(source: SourceFile) -> Node | None:
-    parser = parser_for(source)
-    if parser is None or not source.text.strip():
+    if not source.text.strip():
         return None
-    return parser.parse(source.text.encode("utf-8")).root_node
+    return parse_root(source)
 
 
 def _python_machines(source: SourceFile, root: Node) -> list[Machine]:
@@ -170,6 +186,7 @@ def _script_bugs(source: SourceFile, root: Node) -> list[Finding]:
         if node.type not in {"function_declaration", "method_definition", "arrow_function"}:
             continue
         findings.extend(_unbounded_retries(source, node))
+        findings.extend(_held_locks(source, node))
     return findings
 
 
@@ -183,10 +200,10 @@ def _python_function_machines(source: SourceFile, fn: Node) -> list[Machine]:
             machines.append(_retry_machine(source, name, node, _for_retry_ends(node, fn)))
         elif _is_gather(node):
             machines.append(_gather_machine(source, name, node))
-        elif node.type == "with_statement" and _acquires_in(node):
+        elif node.type == "with_statement" and _owned_by(node, fn) and _with_covers_acquire(node):
             machines.append(_lock_machine(source, name, node, released=True))
-        elif node.type == "call" and _is_acquire_call(node) and not _inside(node, "with_statement"):
-            machines.append(_lock_machine(source, name, node, released=_finally_releases(fn)))
+        elif _is_tracked_acquire(node, fn):
+            machines.append(_lock_machine(source, name, node, released=_acquire_released(node, fn)))
     return machines
 
 
@@ -200,6 +217,8 @@ def _script_function_machines(source: SourceFile, fn: Node) -> list[Machine]:
             machine = _switch_machine(source, name, node)
             if machine is not None:
                 machines.append(machine)
+        elif _is_tracked_acquire(node, fn):
+            machines.append(_lock_machine(source, name, node, released=_acquire_released(node, fn)))
     return machines
 
 
@@ -337,7 +356,7 @@ def _unbounded_retries(source: SourceFile, fn: Node) -> list[Finding]:
     for node in walk_tree(fn):
         if node.type != "while_statement" or not _is_true_loop(node):
             continue
-        if not _has_handler(node):
+        if not _contains_type(node, "try_statement"):
             continue
         handler = "except_clause" if source.language == Language.PYTHON else "catch_clause"
         if _except_can_exit(node, handler):
@@ -354,13 +373,11 @@ def _unbounded_retries(source: SourceFile, fn: Node) -> list[Finding]:
 
 
 def _held_locks(source: SourceFile, fn: Node) -> list[Finding]:
-    if _finally_releases(fn):
-        return []
     findings: list[Finding] = []
     for node in walk_tree(fn):
-        if node.type != "call" or not _is_acquire_call(node):
+        if not _is_acquire_call(node) or not _owned_by(node, fn):
             continue
-        if _inside(node, "with_statement"):
+        if _acquire_released(node, fn):
             continue
         findings.append(
             _bug(
@@ -458,61 +475,227 @@ def _is_true_loop(node: Node) -> bool:
     condition = node.child_by_field_name("condition")
     if condition is None:
         return False
-    text = node_text(condition).strip()
-    return text in {"True", "true", "1"}
+    return _unwrapped_text(condition) in {"True", "true", "1"}
 
 
-def _has_handler(node: Node) -> bool:
-    return any(child.type in {"try_statement", "try"} or _contains_type(child, "try_statement") for child in walk_tree(node))
+def _unwrapped_text(node: Node) -> str:
+    return node_text(_unwrap_parens(node)).strip()
+
+
+def _unwrap_parens(node: Node) -> Node:
+    current = node
+    while current.type == "parenthesized_expression" and current.named_children:
+        current = current.named_children[0]
+    return current
 
 
 def _except_can_exit(loop: Node, handler_type: str) -> bool:
-    handlers = [node for node in walk_tree(loop) if node.type == handler_type]
+    handlers = _retry_handlers(loop, handler_type)
     if not handlers:
         return True
-    return all(_contains_exit(handler) for handler in handlers)
+    return any(_contains_exit(handler) for handler in handlers)
+
+
+def _retry_handlers(loop: Node, handler_type: str) -> list[Node]:
+    handlers: list[Node] = []
+    for try_node in _retry_tries(loop):
+        handlers.extend(child for child in try_node.named_children if child.type == handler_type)
+    return handlers
+
+
+def _retry_tries(loop: Node) -> list[Node]:
+    body = loop.child_by_field_name("body")
+    if body is None:
+        return []
+    return _outermost_tries(body)
+
+
+def _outermost_tries(node: Node) -> list[Node]:
+    if node.type == "try_statement":
+        return [node]
+    if node.type in _NESTED_TYPES or node.type in _LOOP_TYPES:
+        return []
+    found: list[Node] = []
+    for child in node.named_children:
+        found.extend(_outermost_tries(child))
+    return found
 
 
 def _contains_exit(node: Node) -> bool:
-    exits = {"break_statement", "return_statement", "raise_statement", "throw_statement"}
-    return any(child.type in exits for child in walk_tree(node))
+    if node.type in _EXIT_TYPES:
+        return True
+    if node.type in _NESTED_TYPES:
+        return False
+    return any(_contains_exit(child) for child in node.named_children)
 
 
 def _contains_type(node: Node, node_type: str) -> bool:
     return any(child.type == node_type for child in walk_tree(node))
 
 
-def _finally_releases(fn: Node) -> bool:
-    for node in walk_tree(fn):
-        if node.type != "finally_clause":
+def _is_tracked_acquire(node: Node, fn: Node) -> bool:
+    return _is_acquire_call(node) and _owned_by(node, fn) and not _released_by_with(node)
+
+
+def _acquire_released(node: Node, fn: Node) -> bool:
+    if _released_by_with(node) or _released_by_using(node):
+        return True
+    return _finally_releases_receiver(fn, _receiver_text(node))
+
+
+def _released_by_with(node: Node) -> bool:
+    receiver = _receiver_text(node)
+    parent = node.parent
+    while parent is not None and parent.type not in _FN_TYPES:
+        if parent.type == "with_statement":
+            if receiver in _with_receivers(parent) or _call_is_with_item(node, parent):
+                return True
+        parent = parent.parent
+    return False
+
+
+def _with_covers_acquire(node: Node) -> bool:
+    receivers = _with_receivers(node)
+    owner = _enclosing_fn(node)
+    for child in walk_tree(node):
+        if not _is_acquire_call(child):
             continue
-        text = node_text(node)
-        if ".release(" in text or "LOCK_UN" in text or ".unlock(" in text:
+        if owner is not None and not _owned_by(child, owner):
+            continue
+        if _receiver_text(child) in receivers or _call_is_with_item(child, node):
             return True
     return False
 
 
-def _acquires_in(node: Node) -> bool:
-    return any(_is_acquire_call(child) for child in walk_tree(node) if child.type == "call")
+def _with_receivers(node: Node) -> set[str]:
+    clause = next((child for child in node.named_children if child.type == "with_clause"), None)
+    if clause is None:
+        return set()
+    receivers: set[str] = set()
+    for item in clause.named_children:
+        if item.type != "with_item" or not item.named_children:
+            continue
+        expr = _unwrap_parens(item.named_children[0])
+        if expr.type == "as_pattern" and expr.named_children:
+            expr = _unwrap_parens(expr.named_children[0])
+        receivers.add(node_text(expr).strip())
+    return receivers
+
+
+def _call_is_with_item(call: Node, with_stmt: Node) -> bool:
+    parent = call.parent
+    while parent is not None and parent != with_stmt:
+        if parent.type == "with_item":
+            return True
+        if parent.type == "with_statement" or parent.type in _FN_TYPES:
+            return False
+        parent = parent.parent
+    return False
+
+
+def _released_by_using(node: Node) -> bool:
+    current = node
+    parent = node.parent
+    while parent is not None and parent.type in {"await_expression", "parenthesized_expression"}:
+        current = parent
+        parent = parent.parent
+    if parent is None or parent.type != "assignment_expression":
+        return False
+    if not any(child.type == "using" for child in parent.children):
+        return False
+    value = parent.child_by_field_name("right")
+    return value is not None and value == current
+
+
+def _finally_releases_receiver(fn: Node, receiver: str) -> bool:
+    if not receiver:
+        return False
+    for node in walk_tree(fn):
+        if node.type != "finally_clause" or not _owned_by(node, fn):
+            continue
+        if _clause_releases(node, receiver):
+            return True
+    return False
+
+
+def _clause_releases(clause: Node, receiver: str) -> bool:
+    return any(_releases_receiver(call, receiver) for call in _calls_under(clause))
+
+
+def _calls_under(node: Node) -> list[Node]:
+    found: list[Node] = []
+    for child in node.named_children:
+        if child.type in _NESTED_TYPES:
+            continue
+        if child.type in _CALL_TYPES:
+            found.append(child)
+        found.extend(_calls_under(child))
+    return found
+
+
+def _releases_receiver(node: Node, receiver: str) -> bool:
+    if _member_name(node) in _RELEASE_NAMES and _receiver_text(node) == receiver:
+        return True
+    return _lock_un_receiver(node) == receiver
+
+
+def _lock_un_receiver(node: Node) -> str:
+    if "LOCK_UN" not in node_text(node):
+        return ""
+    args = node.child_by_field_name("arguments")
+    if args is None or not args.named_children:
+        return ""
+    target = args.named_children[0]
+    if target.type in _CALL_TYPES:
+        return _receiver_text(target)
+    return node_text(_unwrap_parens(target)).strip()
 
 
 def _is_acquire_call(node: Node) -> bool:
-    fn = node.child_by_field_name("function")
-    if fn is None:
-        return False
-    if fn.type == "attribute":
-        attr = fn.child_by_field_name("attribute")
-        return attr is not None and node_text(attr) in {"acquire", "lock"}
-    return False
+    return node.type in _CALL_TYPES and _member_name(node) in _ACQUIRE_NAMES
 
 
-def _inside(node: Node, ancestor_type: str) -> bool:
+def _member_name(node: Node) -> str:
+    func = node.child_by_field_name("function")
+    if func is None:
+        return ""
+    if func.type == "attribute":
+        attr = func.child_by_field_name("attribute")
+        return node_text(attr) if attr is not None else ""
+    if func.type == "member_expression":
+        prop = func.child_by_field_name("property")
+        return node_text(prop) if prop is not None else ""
+    return ""
+
+
+def _receiver_text(node: Node) -> str:
+    func = node.child_by_field_name("function")
+    if func is None or func.type not in {"attribute", "member_expression"}:
+        return ""
+    obj = func.child_by_field_name("object")
+    if obj is None:
+        return ""
+    return node_text(_unwrap_parens(obj)).strip()
+
+
+def _owned_by(node: Node, fn: Node) -> bool:
     parent = node.parent
     while parent is not None:
-        if parent.type == ancestor_type:
+        if parent == fn:
             return True
+        if parent.type in _FN_TYPES:
+            return False
         parent = parent.parent
     return False
+
+
+def _enclosing_fn(node: Node) -> Node | None:
+    parent = node.parent
+    while parent is not None:
+        if parent.type in _FN_TYPES:
+            return parent
+        parent = parent.parent
+    return None
 
 
 def _fn_name(node: Node) -> str:

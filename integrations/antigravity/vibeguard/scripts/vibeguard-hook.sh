@@ -12,7 +12,7 @@
 #   Stop blocks only when vibeguard exits 1, with
 #   {"decision":"continue","reason":"..."} (the reason includes the findings).
 #   Exit 0 allows the stop with {}, even when lower-severity findings printed.
-#   Exit 2 (scanner or API error) fails open: {} on stdout and the error on stderr.
+#   Exit 2 (scanner/API error) or missing CLI fails closed on Stop and open on PostToolUse.
 #   PostToolUse cannot block; it returns {} and audits on stderr.
 
 set -euo pipefail
@@ -89,6 +89,15 @@ fi
 
 cd "$workspace"
 
+emit_continue_reason() {
+  REASON="$1" python3 -c 'import json, os, sys
+text = os.environ.get("REASON", "")
+if len(text) > 8000:
+    text = text[:8000] + "\n…[truncated]"
+json.dump({"decision": "continue", "reason": text}, sys.stdout)
+sys.stdout.write("\n")'
+}
+
 if ! command -v vibeguard >/dev/null 2>&1; then
   cat >&2 <<'EOF'
 VibeGuard hook: `vibeguard` is not on PATH.
@@ -97,7 +106,11 @@ Install the CLI and restart the agent so this hook can see it:
 From a checkout of this repository:
   pip install -e .
 EOF
-  printf '%s\n' '{}'
+  if [ "$event" = "post-tool" ]; then
+    printf '%s\n' '{}'
+  else
+    printf '%s\n' '{"decision": "continue", "reason": "VibeGuard blocked completion: vibeguard CLI is not on PATH. Install it (pip install -e .) before completing the task."}'
+  fi
   exit 0
 fi
 
@@ -131,8 +144,19 @@ body="${body%"${body##*[![:space:]]}"}"
 
 if [ "$code" -eq 2 ] || [ "$code" -gt 2 ]; then
   err_text="$(cat "$err_file" 2>/dev/null || true)"
-  echo "VibeGuard scan error (exit ${code}): ${body:-${err_text:-unknown error}}" >&2
-  printf '%s\n' '{}'
+  detail="${body:-${err_text:-unknown error}}"
+  if [ -n "$body" ] && [ -n "$err_text" ] && [ "$body" != "$err_text" ]; then
+    detail="${body}"$'\n'"${err_text}"
+  fi
+  echo "VibeGuard scan error (exit ${code}): ${detail}" >&2
+  if [ "$event" = "post-tool" ]; then
+    printf '%s\n' '{}'
+    exit 0
+  fi
+  reason="VibeGuard blocked completion: scan failed with exit ${code}. Fix the scanner or configuration error before completing the task.
+
+${detail}"
+  emit_continue_reason "$reason"
   exit 0
 fi
 
@@ -152,10 +176,5 @@ if [ "$event" = "post-tool" ]; then
   exit 0
 fi
 
-REASON="$reason" python3 -c 'import json, os, sys
-text = os.environ.get("REASON", "")
-if len(text) > 8000:
-    text = text[:8000] + "\n…[truncated]"
-json.dump({"decision": "continue", "reason": text}, sys.stdout)
-sys.stdout.write("\n")'
+emit_continue_reason "$reason"
 exit 0

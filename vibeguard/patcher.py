@@ -5,14 +5,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import Protocol
 
 from vibeguard.models import FIX_THRESHOLD, Finding, ScanContext, Severity
 from vibeguard.redact import redact_secrets
-from vibeguard.settings import api_key, fix_model
+from vibeguard.settings import api_key, fix_model, genai_client
 
 log = logging.getLogger(__name__)
 _DIFF_FENCE = re.compile(r"```(?:diff)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+class _GenerateModels(Protocol):
+    async def generate_content(self, *, model: str, contents: str) -> object: ...
+
+
+class _GenerateAio(Protocol):
+    models: _GenerateModels
+
+
+class _GenerateClient(Protocol):
+    aio: _GenerateAio
 
 
 def generate_fixes(
@@ -20,7 +32,7 @@ def generate_fixes(
     ctx: ScanContext,
     model: str | None = None,
     *,
-    client: Any = None,
+    client: _GenerateClient | None = None,
 ) -> int:
     """Draft patches for critical findings. Returns how many diffs were kept.
 
@@ -50,12 +62,10 @@ async def _draft_all(
     findings: list[Finding],
     ctx: ScanContext,
     model_name: str,
-    client: Any,
+    client: _GenerateClient | None,
 ) -> int:
     if client is None:
-        from google import genai
-
-        client = genai.Client(api_key=api_key())
+        client = genai_client(api_key())
     semaphore = asyncio.Semaphore(4)
 
     async def draft(finding: Finding) -> int:
@@ -65,8 +75,6 @@ async def _draft_all(
                     model=model_name,
                     contents=_prompt(finding, ctx),
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 log.warning(
                     "Fix generation failed for %s %s:%s: %s",
@@ -137,7 +145,7 @@ def _number_lines(source: str, start: int, limit: int = 200) -> str:
     )
 
 
-def _response_text(response: Any) -> str:
+def _response_text(response: object) -> str:
     if response is None:
         return ""
     if isinstance(response, str):
@@ -153,7 +161,7 @@ def _response_text(response: Any) -> str:
     return _candidates_text(getattr(response, "candidates", None))
 
 
-def _candidates_text(candidates: Any) -> str:
+def _candidates_text(candidates: object) -> str:
     if not candidates:
         return ""
     first = candidates[0]

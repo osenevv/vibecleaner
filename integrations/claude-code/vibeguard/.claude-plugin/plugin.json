@@ -1,0 +1,10 @@
+{
+  "name": "vibeguard",
+  "description": "Scans AI-generated code for security holes and slop, and blocks the agent from finishing while critical findings remain.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Vladimir Osenev"
+  },
+  "license": "MIT",
+  "keywords": ["security", "slop", "audit", "vibeguard"]
+}

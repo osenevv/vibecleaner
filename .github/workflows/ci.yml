@@ -4,17 +4,74 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Test
+        run: pytest -q
+
+  benchmarks-and-gates:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[dev]"
-      - name: Test
-        run: pytest -q
-      - name: Offline benchmark
-        run: python benchmarks/run_eval.py --mode offline
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Offline benchmarks (dev, holdout, blind)
+        run: |
+          python benchmarks/run_eval.py --mode offline
+          python benchmarks/run_eval.py --labels benchmarks/holdout_labels.json --mode offline
+          python benchmarks/run_eval.py --labels benchmarks/blind_labels.json --mode offline
+      - name: Self-scan and deslop gates
+        run: |
+          vibeguard scan . --mode offline --no-cache --quiet
+          vibeguard deslop .
+
+  wheel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel and verify non-editable install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip wheel --no-deps --wheel-dir dist .
+          python -m venv /tmp/vg-smoke-venv
+          /tmp/vg-smoke-venv/bin/pip install dist/vibecleaner-*.whl
+          mkdir -p /tmp/vg-smoke-repo
+          printf 'def add(a: int, b: int) -> int:\n    return a + b\n' > /tmp/vg-smoke-repo/app.py
+          /tmp/vg-smoke-venv/bin/vibecleaner version
+          /tmp/vg-smoke-venv/bin/vibeguard version
+          /tmp/vg-smoke-venv/bin/vibecleaner init /tmp/vg-smoke-repo --no-hook --antigravity
+          test -f /tmp/vg-smoke-repo/.agents/plugins/vibeguard/plugin.json
+          /tmp/vg-smoke-venv/bin/vibecleaner /tmp/vg-smoke-repo --quiet --mode offline --no-cache --no-report

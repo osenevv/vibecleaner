@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 from tree_sitter import Node
 
 from vibeguard.models import Finding, Language, ScanContext, SourceFile
+from vibeguard.deslop import build_cross_refs, detect_deslop, detect_repo_deslop
 from vibeguard.prose import detect_prose_tics
 from vibeguard.states import detect_state_bugs
 from vibeguard.ts_parse import attr_leaf as _attr_leaf
@@ -19,7 +20,7 @@ from vibeguard.ts_parse import callee_name as _callee_name
 from vibeguard.ts_parse import decorator_leaf as _decorator_leaf
 from vibeguard.ts_parse import line_text as _line_text
 from vibeguard.ts_parse import node_text as _text
-from vibeguard.ts_parse import parser_for as _parser_for
+from vibeguard.ts_parse import parse_root as _parsed_root
 from vibeguard.ts_parse import python_string as _python_string
 from vibeguard.ts_parse import script_string as _script_string
 from vibeguard.ts_parse import walk_tree as _walk
@@ -227,6 +228,7 @@ def shannon_entropy(s: str) -> float:
 def run_deterministic(ctx: ScanContext) -> list[Finding]:
     """Run every Layer 1 rule over ``ctx.files`` and return a stable, deduped list."""
     findings: list[Finding] = []
+    cross_refs = build_cross_refs(ctx.files)
     for source in ctx.files:
         findings.extend(detect_secrets(source))
         findings.extend(detect_cors(source))
@@ -236,8 +238,10 @@ def run_deterministic(ctx: ScanContext) -> list[Finding]:
         findings.extend(detect_passthrough_wrappers(source))
         findings.extend(detect_prose_tics(source))
         findings.extend(detect_state_bugs(source))
+        findings.extend(detect_deslop(source, cross_refs=cross_refs))
     # RLS is decided across the whole migration set: a later file may enable it.
     findings.extend(detect_supabase_rls_all(ctx.files))
+    findings.extend(detect_repo_deslop(ctx.files))
     return _dedupe(findings)
 
 
@@ -324,13 +328,12 @@ def detect_cors(f: SourceFile) -> list[Finding]:
 def detect_silent_exceptions(f: SourceFile) -> list[Finding]:
     if f.language not in _CODE_LANGS:
         return []
-    parser = _parser_for(f)
-    if parser is None:
+    root = _parsed_root(f)
+    if root is None:
         return []
-    tree = parser.parse(f.text.encode("utf-8"))
     if f.language == Language.PYTHON:
-        return _python_silent(f, tree.root_node)
-    return _script_silent(f, tree.root_node)
+        return _python_silent(f, root)
+    return _script_silent(f, root)
 
 
 def detect_god_file(f: SourceFile) -> list[Finding]:
@@ -342,7 +345,7 @@ def detect_god_file(f: SourceFile) -> list[Finding]:
     root = _parsed_root(f)
     if root is None or not _has_sql_signal(root) or not _has_http_signal(root):
         return []
-    functions = _count_non_route_functions(f)
+    functions = _count_non_route_functions(f, root)
     if functions < 8:
         return []
     return [
@@ -369,13 +372,12 @@ def detect_deprecated_sdk(f: SourceFile) -> list[Finding]:
 def detect_passthrough_wrappers(f: SourceFile) -> list[Finding]:
     if f.language not in _CODE_LANGS:
         return []
-    parser = _parser_for(f)
-    if parser is None:
+    root = _parsed_root(f)
+    if root is None:
         return []
-    tree = parser.parse(f.text.encode("utf-8"))
     if f.language == Language.PYTHON:
-        return _python_wrappers(f, tree.root_node)
-    return _script_wrappers(f, tree.root_node)
+        return _python_wrappers(f, root)
+    return _script_wrappers(f, root)
 
 
 def _env_file_committed(f: SourceFile) -> list[Finding]:
@@ -540,7 +542,7 @@ def _python_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
         if value is not None and _accept_entropy(value, name):
             hits.append((value_node.start_point[0] + 1, value, name))
 
-    def walk(node: Node) -> None:
+    for node in _walk(root):
         if node.type == "assignment":
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
@@ -565,10 +567,6 @@ def _python_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
                     bind(key_name, value)
         elif node.type == "call":
             _python_getenv(node, hits)
-        for child in node.named_children:
-            walk(child)
-
-    walk(root)
     return hits
 
 
@@ -592,10 +590,9 @@ def _python_getenv(call: Node, hits: list[tuple[int, str, str]]) -> None:
 
 
 def _script_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
-    parser = _parser_for(f)
-    if parser is None:
+    root = _parsed_root(f)
+    if root is None:
         return []
-    tree = parser.parse(f.text.encode("utf-8"))
     hits: list[tuple[int, str, str]] = []
 
     def bind(name: str, value_node: Node) -> None:
@@ -603,7 +600,7 @@ def _script_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
         if value is not None and _accept_entropy(value, name):
             hits.append((value_node.start_point[0] + 1, value, name))
 
-    def walk(node: Node) -> None:
+    for node in _walk(root):
         if node.type == "variable_declarator":
             name_node = node.child_by_field_name("name")
             value = node.child_by_field_name("value")
@@ -628,10 +625,6 @@ def _script_entropy(f: SourceFile) -> list[tuple[int, str, str]]:
                     bind(key_name, value)
         elif node.type == "binary_expression":
             _script_env_fallback(node, hits)
-        for child in node.named_children:
-            walk(child)
-
-    walk(tree.root_node)
     return hits
 
 
@@ -774,16 +767,11 @@ def _python_cors_lines(f: SourceFile) -> list[int]:
     root = _parsed_root(f)
     if root is None:
         return []
-    lines: list[int] = []
-
-    def walk(node: Node) -> None:
-        if node.type == "call" and _python_cors_call(node):
-            lines.append(node.start_point[0] + 1)
-        for child in node.named_children:
-            walk(child)
-
-    walk(root)
-    return lines
+    return [
+        node.start_point[0] + 1
+        for node in _walk(root)
+        if node.type == "call" and _python_cors_call(node)
+    ]
 
 
 def _python_cors_call(call: Node) -> bool:
@@ -811,20 +799,14 @@ def _python_cors_dangerous(call: str) -> bool:
 
 
 def _script_cors_lines(f: SourceFile) -> list[int]:
-    parser = _parser_for(f)
-    if parser is None:
+    root = _parsed_root(f)
+    if root is None:
         return []
-    tree = parser.parse(f.text.encode("utf-8"))
-    lines: list[int] = []
-
-    def walk(node: Node) -> None:
-        if node.type == "call_expression" and _script_cors_call(node):
-            lines.append(node.start_point[0] + 1)
-        for child in node.named_children:
-            walk(child)
-
-    walk(tree.root_node)
-    return lines
+    return [
+        node.start_point[0] + 1
+        for node in _walk(root)
+        if node.type == "call_expression" and _script_cors_call(node)
+    ]
 
 
 def _script_cors_call(call: Node) -> bool:
@@ -883,8 +865,7 @@ def _header_wildcard_line(text: str) -> int | None:
 
 def _python_silent(f: SourceFile, root: Node) -> list[Finding]:
     findings: list[Finding] = []
-
-    def walk(node: Node) -> None:
+    for node in _walk(root):
         if node.type == "except_clause" and _broad_except(node) and _python_body_silent(node):
             findings.append(
                 _finding(
@@ -894,10 +875,6 @@ def _python_silent(f: SourceFile, root: Node) -> list[Finding]:
                     "Broad except swallows the error without logging or re-raising",
                 )
             )
-        for child in node.named_children:
-            walk(child)
-
-    walk(root)
     return findings
 
 
@@ -948,8 +925,7 @@ def _python_stmt_silent(stmt: Node) -> bool:
 
 def _script_silent(f: SourceFile, root: Node) -> list[Finding]:
     findings: list[Finding] = []
-
-    def walk(node: Node) -> None:
+    for node in _walk(root):
         if node.type == "catch_clause":
             body = node.child_by_field_name("body")
             if body is not None and body.type == "statement_block" and _block_empty(body):
@@ -970,10 +946,6 @@ def _script_silent(f: SourceFile, root: Node) -> list[Finding]:
                     "Empty .catch() swallows the rejection",
                 )
             )
-        for child in node.named_children:
-            walk(child)
-
-    walk(root)
     return findings
 
 
@@ -1022,13 +994,9 @@ def _script_stmt_silent(stmt: Node) -> bool:
     return len(values) == 1 and values[0].type == "identifier" and _text(values[0]) == "undefined"
 
 
-def _count_non_route_functions(f: SourceFile) -> int:
-    parser = _parser_for(f)
-    if parser is None:
-        return 0
-    tree = parser.parse(f.text.encode("utf-8"))
+def _count_non_route_functions(f: SourceFile, root: Node) -> int:
     count = 0
-    for node in _walk(tree.root_node):
+    for node in _walk(root):
         if f.language == Language.PYTHON and node.type == "function_definition":
             if not _python_route_function(node):
                 count += 1
@@ -1155,16 +1123,11 @@ def _regex_deprecated(f: SourceFile, patterns: tuple[tuple[str, re.Pattern[str]]
 
 def _python_wrappers(f: SourceFile, root: Node) -> list[Finding]:
     findings: list[Finding] = []
-
-    def walk(node: Node) -> None:
+    for node in _walk(root):
         if node.type == "function_definition":
             finding = _python_wrapper(f, node)
             if finding is not None:
                 findings.append(finding)
-        for child in node.named_children:
-            walk(child)
-
-    walk(root)
     return findings
 
 
@@ -1371,13 +1334,6 @@ def _is_env_example(path: str) -> bool:
     return PurePosixPath(path).name in _ENV_EXAMPLE_NAMES
 
 
-def _parsed_root(source: SourceFile) -> Node | None:
-    parser = _parser_for(source)
-    if parser is None:
-        return None
-    return parser.parse(source.text.encode("utf-8")).root_node
-
-
 def _has_sql_signal(root: Node) -> bool:
     for node in _walk(root):
         literal = _sql_literal(node)
@@ -1506,7 +1462,7 @@ _ENV_ASSIGN = re.compile(
     r"^(?P<export>(?:export\s+)?)(?P<key>[A-Za-z_][\w]*)(?P<eq>\s*=\s*)(?P<raw>.*)$"
 )
 _ASSIGN_VALUE = re.compile(
-    r"""(?P<head>(?:["'][A-Za-z_][\w.-]*["']|[A-Za-z_][\w.-]*)\s*[:=]\s*)"""
+    r"""(?P<head>(?:["'][A-Za-z_][\w.-]*["']|(?:(?<![\w.-])|(?<=[)\]?]\.))[A-Za-z_][\w.-]*)\s*[:=]\s*)"""
     r"""(?P<val>"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^ \t,;#()\[\]{}"']+)"""
 )
 
@@ -1535,6 +1491,8 @@ def _mask_snippet(line: str, secrets: list[str] | None = None, *, redact_env: bo
 
 
 def _mask_assignments(line: str, secrets: list[str], *, redact_env: bool) -> str:
+    if ":" not in line and "=" not in line:
+        return line
     match = _ENV_ASSIGN.match(line)
     if match is not None:
         literal = _literal_token(match.group("raw").strip())

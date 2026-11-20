@@ -7,6 +7,7 @@ Layer 3 (reporter + patcher) only exchange the types defined here.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -123,8 +124,8 @@ RULES: dict[str, RuleSpec] = {
             "Remove `debugger`, `breakpoint()`, `pdb.set_trace()` and stray `console.log` from shipped code; use the project logger.",
         ),
         RuleSpec(
-            "D9.larp_comment", "D9", "Comment narrating in-motion work or a placeholder", Category.SLOP, Severity.LOW, 1,
-            "Delete comments about what changed or what a real implementation would do; fix the code or state the constraint it hides.",
+            "D9.larp_comment", "D9", "AI comment slop, placeholder, or in-motion narration", Category.SLOP, Severity.LOW, 1,
+            "Delete comments that narrate changes, add banner dividers, number trivial steps, use empty labels, or mark block ends; state only the constraint the code hides.",
         ),
         RuleSpec(
             "D9.legacy_fallback", "D9", "Legacy, backup, or parallel-version code path", Category.SLOP, Severity.LOW, 1,
@@ -224,6 +225,26 @@ def register_project_rule(spec: RuleSpec) -> None:
         raise ValueError(f"project rules are Layer 1 only: {spec.rule_id!r}")
     RULES[spec.rule_id] = spec
 
+
+def unregister_project_rules(rule_ids: Iterable[str] | None = None) -> None:
+    """Drop project rules from ``RULES``.
+
+    ``None`` removes every ``P.*`` id. A built-in id raises ``ValueError``.
+    Ids that are already absent are ignored.
+    """
+    if rule_ids is None:
+        targets = [rule_id for rule_id in RULES if rule_id.startswith(PROJECT_RULE_PREFIX)]
+    else:
+        targets: list[str] = []
+        for rule_id in rule_ids:
+            if not rule_id.startswith(PROJECT_RULE_PREFIX):
+                raise ValueError(
+                    f"project rule id must start with {PROJECT_RULE_PREFIX!r}: {rule_id!r}"
+                )
+            targets.append(rule_id)
+    for rule_id in targets:
+        RULES.pop(rule_id, None)
+
 # Short question-key suffixes for the Decisions API (keys must match [A-Za-z0-9_-]+).
 LAYER2_KEY_SUFFIX: dict[str, str] = {
     "D3.missing_auth": "missing_auth",
@@ -304,10 +325,11 @@ class Finding:
     snippet: str | None = None
     fix_patch: str | None = None  # unified diff from patcher (--fix)
     module_risk: float | None = None  # Layer 2 `severity` score question: expected level 0 (clean) .. 2 (critical)
+    rule_spec: RuleSpec | None = field(default=None, repr=False, compare=False)
 
     @property
     def spec(self) -> RuleSpec:
-        return RULES[self.rule_id]
+        return self.rule_spec if self.rule_spec is not None else RULES[self.rule_id]
 
     @property
     def severity(self) -> Severity:
@@ -366,3 +388,4 @@ class ScanResult:
     duration_s: float
     diff_base: str | None = None
     review: ReviewRouting | None = None
+    project_rule_specs: tuple[RuleSpec, ...] = ()

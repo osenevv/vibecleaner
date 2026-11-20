@@ -7,13 +7,15 @@ parent. ``--labels benchmarks/holdout_labels.json`` loads benchmarks/holdout.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import math
+import socket
 import sys
 import time
 import traceback
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +71,7 @@ class CaseScore:
     false_negatives: tuple[str, ...]
     mark: str
     latency_s: float
+    unscored: tuple[str, ...] = ()
 
 
 @dataclass
@@ -81,6 +84,8 @@ class ThresholdReport:
     cases: list[CaseScore]
     negative_cases: int
     negative_flagged: int
+    unscored: dict[str, int] = field(default_factory=dict)
+    unscored_negative_flagged: int = 0
 
 
 @dataclass
@@ -223,20 +228,52 @@ def load_scanner():
     return run_scan
 
 
+@contextlib.contextmanager
+def _block_outbound_network() -> Iterator[None]:
+    """Fail loudly if offline evaluation attempts any outbound TCP/UDP connection."""
+    orig_connect = socket.socket.connect
+    orig_create = socket.create_connection
+
+    def _forbid_connect(self: socket.socket, address: object) -> None:
+        if self.family in {socket.AF_INET, socket.AF_INET6}:
+            raise RuntimeError(f"outbound network call forbidden in offline eval: {address!r}")
+        return orig_connect(self, address)
+
+    def _forbid_create(address: object, *args: object, **kwargs: object) -> socket.socket:
+        raise RuntimeError(f"outbound network call forbidden in offline eval: {address!r}")
+
+    socket.socket.connect = _forbid_connect  # type: ignore[method-assign]
+    socket.create_connection = _forbid_create  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        socket.socket.connect = orig_connect  # type: ignore[method-assign]
+        socket.create_connection = orig_create  # type: ignore[assignment]
+
+
 def scan_case(run_scan, case: CaseSpec, mode: str, threshold: float) -> Observation:
     started = time.perf_counter()
-    scanned = run_scan(
-        case.path,
-        diff_base=None,
-        mode=mode,
-        threshold=threshold,
-        use_cache=False,
-        fix=False,
-    )
+    guard = _block_outbound_network() if mode in {"offline", "off"} else contextlib.nullcontext()
+    with guard:
+        scanned = run_scan(
+            case.path,
+            diff_base=None,
+            mode=mode,
+            threshold=threshold,
+            use_cache=False,
+            fix=False,
+        )
     elapsed = time.perf_counter() - started
     if not isinstance(scanned, tuple) or len(scanned) != 2:
         raise TypeError(f"{case.case_id}: run_scan must return (ScanResult, ScanContext)")
     result, _context = scanned
+    if result.files_scanned == 0:
+        raise RuntimeError(f"{case.case_id}: scanned 0 files")
+    if result.judge.errors:
+        raise RuntimeError(f"{case.case_id}: judge reported errors: {'; '.join(result.judge.errors)}")
+    observed_mode = str(result.judge.mode)
+    if mode in {"live", "offline", "off"} and observed_mode != mode:
+        raise RuntimeError(f"{case.case_id}: requested mode {mode!r} but observed {observed_mode!r}")
     findings: list[tuple[str, float | None]] = []
     for finding in result.findings:
         probability = None if finding.probability is None else float(finding.probability)
@@ -246,7 +283,7 @@ def scan_case(run_scan, case: CaseSpec, mode: str, threshold: float) -> Observat
         findings=findings,
         latency_s=elapsed,
         input_tokens=int(result.judge.input_tokens),
-        mode=str(result.judge.mode),
+        mode=observed_mode,
     )
 
 
@@ -277,13 +314,23 @@ def score(observations: Sequence[Observation], threshold: float, post_filter: bo
     cases: list[CaseScore] = []
     negative_cases = 0
     negative_flagged = 0
+    unscored_negative_flagged = 0
+    unscored_hits: dict[str, int] = {}
     for obs in observations:
-        predicted = predicted_detectors(obs, threshold, post_filter)
+        detected = predicted_detectors(obs, threshold, post_filter)
+        # Labels only name the detectors in DETECTORS. A newer detector the
+        # labels never covered cannot be a false positive against them.
+        predicted = tuple(detector for detector in detected if detector in DETECTORS)
+        unscored = tuple(detector for detector in detected if detector not in DETECTORS)
+        for detector in unscored:
+            unscored_hits[detector] = unscored_hits.get(detector, 0) + 1
         false_positives, false_negatives, mark = case_mark(obs.spec.expected, predicted)
         if obs.spec.kind == "negative":
             negative_cases += 1
             if predicted:
                 negative_flagged += 1
+            if unscored:
+                unscored_negative_flagged += 1
         expected_set = set(obs.spec.expected)
         predicted_set = set(predicted)
         for detector in expected_set & predicted_set:
@@ -305,6 +352,7 @@ def score(observations: Sequence[Observation], threshold: float, post_filter: bo
                 false_negatives=false_negatives,
                 mark=mark,
                 latency_s=obs.latency_s,
+                unscored=unscored,
             )
         )
     totals = Counts()
@@ -323,6 +371,8 @@ def score(observations: Sequence[Observation], threshold: float, post_filter: bo
         cases=cases,
         negative_cases=negative_cases,
         negative_flagged=negative_flagged,
+        unscored=dict(sorted(unscored_hits.items())),
+        unscored_negative_flagged=unscored_negative_flagged,
     )
 
 
@@ -374,6 +424,12 @@ def render_markdown(report: EvalReport) -> str:
     lines.append("")
     lines.extend(_counts_table(report.primary))
     lines.append("")
+    lines.append(
+        "FPR is the share of clean cases with a finding from a labeled detector "
+        "(D1, D2, D3, D4, D5, D6a, D6b, D7a, D7b). "
+        "Detectors outside that set are listed separately and do not move precision, recall, or FPR."
+    )
+    lines.append("")
     lines.append("## Per detector")
     lines.append("")
     lines.extend(_detector_table(report.primary))
@@ -382,6 +438,16 @@ def render_markdown(report: EvalReport) -> str:
     lines.append("")
     lines.extend(_layer_table(report.primary))
     lines.append("")
+    if report.primary.unscored:
+        lines.append("## Unscored detectors")
+        lines.append("")
+        lines.append(
+            "These detectors are outside the label set. "
+            "Their hits are listed here and do not count toward precision, recall, or FPR:"
+        )
+        lines.append("")
+        lines.extend(f"- {detector}: {count} case(s)" for detector, count in report.primary.unscored.items())
+        lines.append("")
     lines.append("## Latency")
     lines.append("")
     lines.append(_latency_line(report.latency_s))
@@ -522,6 +588,8 @@ def _public_summary(report: ThresholdReport) -> dict[str, object]:
     metrics["fpr"] = false_positive_rate(report)
     metrics["negative_cases"] = report.negative_cases
     metrics["negative_flagged"] = report.negative_flagged
+    metrics["unscored_negative_flagged"] = report.unscored_negative_flagged
+    metrics["unscored_cases_by_detector"] = dict(report.unscored)
     return metrics
 
 
@@ -535,6 +603,7 @@ def _public_case(case: CaseScore) -> dict[str, object]:
         "fn": list(case.false_negatives),
         "mark": case.mark,
         "latency_s": case.latency_s,
+        "unscored": list(case.unscored),
     }
 
 
@@ -565,6 +634,16 @@ def emit_console(report: EvalReport) -> None:
         str(report.primary.counts.fn),
     )
     console.print(summary)
+    console.print(
+        "FPR is the share of clean cases with a finding from a labeled detector "
+        "(D1, D2, D3, D4, D5, D6a, D6b, D7a, D7b). "
+        "Unscored detectors are listed separately and do not count toward FPR."
+    )
+    if report.primary.unscored:
+        listed = ", ".join(
+            f"{detector} ({count} case(s))" for detector, count in report.primary.unscored.items()
+        )
+        console.print(f"Unscored detectors: {listed}")
     detectors = Table(title="Per detector")
     for column in ("detector", "tp", "fp", "fn", "precision", "recall", "f1"):
         detectors.add_column(column)

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
 from vibeguard import __version__
-from vibeguard.models import RULES, Category, Finding, ScanResult, Severity
+from vibeguard.models import PROJECT_RULE_PREFIX, RULES, Category, Finding, RuleSpec, ScanResult, Severity
+from vibeguard.prompt_fix import build_fix_prompt, plain_explanation
 from vibeguard.redact import redact_secrets
 
 INPUT_USD_PER_MILLION = 0.10
@@ -117,6 +117,8 @@ def _render_full(result: ScanResult, console: Console) -> None:
         f"cache hits: {judge.cache_hits}"
     )
     console.print(f"input tokens: {judge.input_tokens}  estimated cost: ${cost:.6f} ($0.10/1M)")
+    if result.review is not None:
+        console.print(f"review tier {result.review.tier}: {result.review.reason}", markup=False)
     if judge.errors:
         console.print(
             f"[bold red]ERROR[/bold red] {len(judge.errors)} Layer-2 chunk(s) failed"
@@ -128,6 +130,17 @@ def _render_full(result: ScanResult, console: Console) -> None:
             console.print(line)
     if result.findings:
         console.print(_findings_table(result.findings))
+        console.print()
+        console.print("[bold]Plain-English summary:[/bold]")
+        for index, finding in enumerate(result.findings, start=1):
+            risk, fix = plain_explanation(finding)
+            console.print(f"  {index}. {risk} ({finding.file}:{finding.line})", markup=False)
+            console.print(f"     Fix: {fix}", markup=False)
+        prompt = build_fix_prompt(result)
+        if prompt:
+            console.print()
+            console.print("[bold]Copy and paste this into your AI coding agent (or run `vibeguard --autofix`):[/bold]")
+            console.print(prompt, markup=False)
     else:
         console.print("[bold green]PASS[/bold green] no findings")
     skipped = judge.units_skipped_layer1
@@ -188,6 +201,7 @@ def to_markdown(result: ScanResult) -> str:
         for error in judge.errors:
             lines.append(f"- {error}")
         lines.append("")
+    lines.extend(_review_lines(result))
     lines.append("## Findings")
     lines.append("")
     if not result.findings:
@@ -211,10 +225,10 @@ def to_markdown(result: ScanResult) -> str:
             lines.append(
                 "| {rule} | {location} | {prob} | {risk} | {message} |".format(
                     rule=finding.rule_id,
-                    location=_md_cell(location),
+                    location=markdown_cell(location),
                     prob=prob,
                     risk=_risk_cell(finding),
-                    message=_md_cell(finding.message),
+                    message=markdown_cell(finding.message),
                 )
             )
         lines.append("")
@@ -237,7 +251,8 @@ def to_markdown(result: ScanResult) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _md_cell(text: str) -> str:
+def markdown_cell(text: str) -> str:
+    """Escape a Markdown table cell. Newlines become spaces; other whitespace stays."""
     return text.replace("|", "\\|").replace("\n", " ")
 
 
@@ -253,7 +268,7 @@ def write_markdown(result: ScanResult, path: Path | str) -> None:
     destination.write_text(to_markdown(result), encoding="utf-8")
 
 
-def to_sarif(result: ScanResult) -> dict[str, Any]:
+def to_sarif(result: ScanResult) -> dict[str, object]:
     """SARIF 2.1.0 document. Paths are repo-relative POSIX."""
     results = []
     for finding in result.findings:
@@ -288,7 +303,7 @@ def to_sarif(result: ScanResult) -> dict[str, Any]:
                         "name": "VibeGuard",
                         "version": __version__,
                         "informationUri": _INFO_URI,
-                        "rules": [_sarif_rule(spec) for spec in RULES.values()],
+                        "rules": [_sarif_rule(spec) for spec in _rules_for_result(result)],
                     }
                 },
                 "results": results,
@@ -297,7 +312,29 @@ def to_sarif(result: ScanResult) -> dict[str, Any]:
     }
 
 
-def _sarif_rule(spec: Any) -> dict[str, Any]:
+def _rules_for_result(result: ScanResult) -> list[RuleSpec]:
+    """Built-in rules, the scan's project rules, and ``P.*`` ids on its findings."""
+    specs = [spec for spec in RULES.values() if not spec.rule_id.startswith(PROJECT_RULE_PREFIX)]
+    seen = {spec.rule_id for spec in specs}
+    for spec in result.project_rule_specs:
+        _append_project_spec(specs, seen, spec)
+    for finding in result.findings:
+        if finding.rule_id in seen or not finding.rule_id.startswith(PROJECT_RULE_PREFIX):
+            continue
+        spec = finding.rule_spec or RULES.get(finding.rule_id)
+        if spec is not None:
+            _append_project_spec(specs, seen, spec)
+    return specs
+
+
+def _append_project_spec(specs: list[RuleSpec], seen: set[str], spec: RuleSpec) -> None:
+    if spec.rule_id in seen or not spec.rule_id.startswith(PROJECT_RULE_PREFIX):
+        return
+    specs.append(spec)
+    seen.add(spec.rule_id)
+
+
+def _sarif_rule(spec: RuleSpec) -> dict[str, object]:
     return {
         "id": spec.rule_id,
         "name": spec.title,
@@ -340,7 +377,7 @@ def write_sarif(result: ScanResult, path: Path | str) -> None:
     )
 
 
-def to_json(result: ScanResult) -> dict[str, Any]:
+def to_json(result: ScanResult) -> dict[str, object]:
     security, slop = compute_scores(result.findings)
     judge = result.judge
     return {
@@ -361,11 +398,37 @@ def to_json(result: ScanResult) -> dict[str, Any]:
             "estimated_cost_usd": estimated_cost(judge.input_tokens),
             "errors": list(judge.errors),
         },
+        "review": _review_json(result),
         "findings": [_finding_json(finding) for finding in result.findings],
     }
 
 
-def _finding_json(finding: Finding) -> dict[str, Any]:
+def _review_json(result: ScanResult) -> dict[str, object] | None:
+    review = result.review
+    if review is None:
+        return None
+    return {
+        "tier": review.tier,
+        "reason": review.reason,
+        "human_review": list(review.human_review),
+        "file_risk": {path: tier.value for path, tier in sorted(review.file_risk.items())},
+    }
+
+
+def _review_lines(result: ScanResult) -> list[str]:
+    review = result.review
+    if review is None:
+        return []
+    lines = ["## Review routing", "", f"Tier {review.tier}: {review.reason}", ""]
+    if review.human_review:
+        lines.append("A person should read:")
+        lines.append("")
+        lines.extend(f"- `{path}`" for path in review.human_review)
+        lines.append("")
+    return lines
+
+
+def _finding_json(finding: Finding) -> dict[str, object]:
     return {
         "rule_id": finding.rule_id,
         "file": finding.file,

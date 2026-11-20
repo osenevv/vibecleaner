@@ -7,8 +7,10 @@ from pathlib import Path
 
 from vibeguard.cache import DecisionCache
 from vibeguard.decision_judge import judge, select_backend, units_to_skip
-from vibeguard.models import DEFAULT_THRESHOLD, Finding, ScanContext, ScanResult
+from vibeguard.models import DEFAULT_THRESHOLD, PROJECT_RULE_PREFIX, RULES, Finding, ScanContext, ScanResult
 from vibeguard.patcher import generate_fixes
+from vibeguard.project_rules import apply_project_rules, load_project_rules
+from vibeguard.risk import route_review
 
 
 def run_scan(
@@ -27,7 +29,8 @@ def run_scan(
     from vibeguard.deterministic import run_deterministic
 
     ctx = collect(root, diff_base=diff_base)
-    layer1 = list(run_deterministic(ctx))
+    project_rules = load_project_rules(ctx.root)
+    layer1 = list(run_deterministic(ctx)) + apply_project_rules(project_rules, ctx.files)
     skip = units_to_skip(ctx.units, layer1)
     backend = select_backend(mode)
     cache = DecisionCache(
@@ -54,5 +57,9 @@ def run_scan(
         judge=stats,
         duration_s=time.perf_counter() - started,
         diff_base=diff_base,
+        review=route_review(ctx.files, findings, ctx.changed_files),
+        project_rule_specs=tuple(
+            RULES[PROJECT_RULE_PREFIX + rule.id] for rule in project_rules.rules
+        ),
     )
     return result, ctx

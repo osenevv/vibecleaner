@@ -103,6 +103,15 @@ def test_lock_acquire_without_release_is_flagged() -> None:
         "        work()\n",
     )
     assert detect_state_bugs(blocked) == []
+    blocked_locks = [machine for machine in extract_machines([blocked]) if machine.kind == "lock"]
+    assert len(blocked_locks) == 1
+    assert blocked_locks[0].line == 2
+    assert [edge.target for edge in blocked_locks[0].transitions] == ["held", "free"]
+
+    guarded_locks = [machine for machine in extract_machines([guarded]) if machine.kind == "lock"]
+    assert len(guarded_locks) == 1
+    assert guarded_locks[0].line == 2
+    assert [edge.target for edge in guarded_locks[0].transitions] == ["held", "free"]
 
 
 def test_enum_and_union_become_transition_tables() -> None:
@@ -141,3 +150,196 @@ def test_states_command_writes_the_file_and_fails_on_a_spin(tmp_path: Path, caps
     assert "D8.unbounded_retry" in body
     assert "poll retry" in body
     assert "wrote" in capsys.readouterr().out
+
+
+def test_typescript_while_true_retry_is_flagged_and_throw_is_not() -> None:
+    spinning = _ts(
+        "spin.ts",
+        "function poll() {\n"
+        "  while (true) {\n"
+        "    try {\n"
+        "      return fetch();\n"
+        "    } catch (e) {\n"
+        "      log();\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    hits = detect_state_bugs(spinning)
+    assert [hit.rule_id for hit in hits] == ["D8.unbounded_retry"]
+    assert hits[0].line == 2
+
+    nested_parens = _ts(
+        "parens.ts",
+        "function poll() {\n"
+        "  while ((true)) {\n"
+        "    try { return fetch(); } catch (e) { log(); }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert [hit.rule_id for hit in detect_state_bugs(nested_parens)] == ["D8.unbounded_retry"]
+
+    bounded = _ts(
+        "bounded.ts",
+        "function poll(tries: number) {\n"
+        "  while (true) {\n"
+        "    try {\n"
+        "      return fetch();\n"
+        "    } catch (e) {\n"
+        "      tries -= 1;\n"
+        "      if (tries <= 0) throw e;\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert detect_state_bugs(bounded) == []
+
+
+def test_typescript_lock_acquire_without_release_is_flagged() -> None:
+    bare = _ts(
+        "bare.ts",
+        "async function run(mutex: Mutex) {\n"
+        "  await mutex.acquire();\n"
+        "  work();\n"
+        "}\n",
+    )
+    hits = detect_state_bugs(bare)
+    assert [hit.rule_id for hit in hits] == ["D8.lock_not_released"]
+    assert "mutex.acquire" in (hits[0].snippet or "")
+
+    released = _ts(
+        "released.ts",
+        "async function run(mutex: Mutex) {\n"
+        "  await mutex.acquire();\n"
+        "  try {\n"
+        "    work();\n"
+        "  } finally {\n"
+        "    mutex.release();\n"
+        "  }\n"
+        "}\n",
+    )
+    assert detect_state_bugs(released) == []
+
+    unlocked = _ts(
+        "unlocked.ts",
+        "async function run(mutex: Mutex) {\n"
+        "  await mutex.lock();\n"
+        "  try {\n"
+        "    work();\n"
+        "  } finally {\n"
+        "    mutex.unlock();\n"
+        "  }\n"
+        "}\n",
+    )
+    assert detect_state_bugs(unlocked) == []
+
+    disposed = _ts(
+        "disposed.ts",
+        "async function run(mutex: Mutex) {\n"
+        "  using lock = await mutex.acquire();\n"
+        "  work();\n"
+        "}\n",
+    )
+    assert detect_state_bugs(disposed) == []
+
+
+def test_nested_except_continue_does_not_mark_a_raising_retry_unbounded() -> None:
+    nested = _py(
+        "nested.py",
+        "def poll():\n"
+        "    while True:\n"
+        "        try:\n"
+        "            try:\n"
+        "                return fetch()\n"
+        "            except JSONDecodeError:\n"
+        "                continue\n"
+        "        except Exception:\n"
+        "            raise\n",
+    )
+    assert detect_state_bugs(nested) == []
+    retry = next(machine for machine in extract_machines([nested]) if machine.kind == "retry")
+    assert retry.invariant == "A caught failure reaches raise, return, or break."
+
+    spinning = _py(
+        "spinning.py",
+        "def poll():\n"
+        "    while True:\n"
+        "        try:\n"
+        "            try:\n"
+        "                return fetch()\n"
+        "            except JSONDecodeError:\n"
+        "                continue\n"
+        "        except Exception:\n"
+        "            log()\n",
+    )
+    assert [hit.rule_id for hit in detect_state_bugs(spinning)] == ["D8.unbounded_retry"]
+
+    mixed = _py(
+        "mixed.py",
+        "def poll():\n"
+        "    while True:\n"
+        "        try:\n"
+        "            return fetch()\n"
+        "        except TimeoutError:\n"
+        "            continue\n"
+        "        except Exception:\n"
+        "            raise\n",
+    )
+    assert detect_state_bugs(mixed) == []
+
+    no_exit = _py(
+        "no_exit.py",
+        "def poll():\n"
+        "    while True:\n"
+        "        try:\n"
+        "            return fetch()\n"
+        "        except TimeoutError:\n"
+        "            continue\n"
+        "        except Exception:\n"
+        "            log()\n",
+    )
+    assert [hit.rule_id for hit in detect_state_bugs(no_exit)] == ["D8.unbounded_retry"]
+
+
+def test_each_acquire_is_paired_with_its_own_release() -> None:
+    both = _py(
+        "both.py",
+        "def run(a, b):\n"
+        "    a.acquire()\n"
+        "    b.acquire()\n"
+        "    try:\n"
+        "        work()\n"
+        "    finally:\n"
+        "        a.release()\n",
+    )
+    hits = detect_state_bugs(both)
+    assert [hit.rule_id for hit in hits] == ["D8.lock_not_released"]
+    assert "b.acquire" in (hits[0].snippet or "")
+    locks = [machine for machine in extract_machines([both]) if machine.kind == "lock"]
+    assert [machine.line for machine in locks] == [2, 3]
+    assert [len(machine.transitions) for machine in locks] == [2, 1]
+
+    other = _py(
+        "other.py",
+        "def run(lock, other):\n"
+        "    with other:\n"
+        "        lock.acquire()\n"
+        "        work()\n",
+    )
+    other_hits = detect_state_bugs(other)
+    assert [hit.rule_id for hit in other_hits] == ["D8.lock_not_released"]
+    assert "lock.acquire" in (other_hits[0].snippet or "")
+
+    flock = _py(
+        "flock.py",
+        "def run(a, b):\n"
+        "    a.acquire()\n"
+        "    b.acquire()\n"
+        "    try:\n"
+        "        work()\n"
+        "    finally:\n"
+        "        fcntl.flock(a.fileno(), fcntl.LOCK_UN)\n",
+    )
+    flock_hits = detect_state_bugs(flock)
+    assert [hit.rule_id for hit in flock_hits] == ["D8.lock_not_released"]
+    assert "b.acquire" in (flock_hits[0].snippet or "")

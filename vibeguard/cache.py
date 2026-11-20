@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import logging
 import math
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from vibeguard.models import (
@@ -23,6 +27,13 @@ log = logging.getLogger(__name__)
 CACHE_VERSION = 1
 GEMINI_MODEL = "gemini-decision-1"
 OFFLINE_MODEL = "offline-heuristic"
+
+
+@dataclass
+class ChunkVerdict:
+    scores: dict[str, dict[str, float]]
+    severity: dict[str, float]
+    input_tokens: int
 
 
 def question_set_version(model: str) -> str:
@@ -67,7 +78,6 @@ class DecisionCache:
         self.enabled = enabled
         self.model = model
         self._hits = 0
-        self._misses = 0
         self._dirty = False
         self._entries: dict[str, dict[str, object]] = {}
         if self.enabled:
@@ -77,21 +87,15 @@ class DecisionCache:
     def hits(self) -> int:
         return self._hits
 
-    @property
-    def misses(self) -> int:
-        return self._misses
-
     def get(self, unit: CodeUnit, auth_context: str) -> dict[str, float] | None:
         if not self.enabled:
             return None
         key = cache_key(self.model, unit, auth_context)
         entry = self._entries.get(key)
         if entry is None:
-            self._misses += 1
             return None
         scores = _scores_for_model(entry, self.model)
         if scores is None:
-            self._misses += 1
             if isinstance(entry, dict) and entry.get("model") == self.model:
                 log.warning(
                     "Ignoring invalid decision cache entry %s: every Layer-2 score must be a finite float in [0, 1]",
@@ -138,12 +142,14 @@ class DecisionCache:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_name(self.path.name + ".lock")
         with lock_path.open("a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 self._merge_disk_entries()
                 self._write_atomic()
             finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         self._dirty = False
 
     def _write_atomic(self) -> None:
@@ -268,20 +274,27 @@ def _validated_scores(scores: object) -> dict[str, float] | None:
     return out
 
 
-def _unit_interval(value: object) -> float | None:
+def _finite_number(value: object) -> float | None:
+    """Finite float from an int or float. Bool, nan, and inf are rejected."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
-    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+    if not math.isfinite(number):
         return None
     return number
+
+
+def _closed_range(value: object, upper: float) -> float | None:
+    number = _finite_number(value)
+    if number is None or not 0.0 <= number <= upper:
+        return None
+    return number
+
+
+def _unit_interval(value: object) -> float | None:
+    return _closed_range(value, 1.0)
 
 
 def _bounded_risk(value: object) -> float | None:
     """Keep a severity-question score only when it lies on the 0..2 rubric."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    if not math.isfinite(number) or not 0.0 <= number <= 2.0:
-        return None
-    return number
+    return _closed_range(value, 2.0)

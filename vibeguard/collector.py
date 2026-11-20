@@ -18,7 +18,7 @@ from vibeguard.ts_parse import callee_name as _callee_name
 from vibeguard.ts_parse import decorator_leaf as _decorator_leaf
 from vibeguard.ts_parse import line_text as _line_text
 from vibeguard.ts_parse import node_text as _text
-from vibeguard.ts_parse import parser_for as _parser_for
+from vibeguard.ts_parse import parse_root
 from vibeguard.ts_parse import python_string as _python_string
 from vibeguard.ts_parse import script_string as _script_string
 from vibeguard.ts_parse import walk_tree as _walk
@@ -56,6 +56,8 @@ _SKIPPED_FILES = frozenset(
     {
         "VIBEGUARD_REPORT.md",
         "VIBEGUARD_STATES.md",
+        "VIBEGUARD_DESLOP.md",
+        "VIBEGUARD_PREFLIGHT.md",
         ".vibeguard_cache.json",
         ".vibeguard_cache.json.lock",
         "vibeguard.sarif",
@@ -126,7 +128,7 @@ _AUTH_NAME = re.compile(
     re.IGNORECASE,
 )
 _AUTHISH = re.compile(
-    r"(auth|session|jwt|clerk|oauth|passport|protect|login|credential|supabase)",
+    r"(auth|session|jwt|clerk|oauth|passport|protect|login|credential|supabase|gate|gatekeeper|guard|verify|require|member|token|pin|principal|role|admin)",
     re.IGNORECASE,
 )
 _EMPTY_AUTH = "No global auth middleware or router-level dependencies detected."
@@ -171,22 +173,26 @@ def walk_repo(root: Path) -> list[SourceFile]:
     if not given.is_dir():
         raise CollectorError(f"{given} is not a directory")
     root = given.resolve()
-    specs = _ignore_specs(root)
+    base_specs = _ancestor_gitignores(root)
     tracked_env = _tracked_env_files(root)
+    specs_by_dir: dict[Path, list[tuple[Path, pathspec.PathSpec]]] = {root: base_specs}
     found: list[SourceFile] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         current = Path(dirpath)
         rel_dir = current.relative_to(root)
+        specs = specs_by_dir.pop(current) + _ignore_specs(current)
         kept_dirs: list[str] = []
         for name in sorted(dirnames):
             if name in _SKIP_DIRS:
                 continue
+            sub_path = current / name
             rel = name if rel_dir == Path(".") else (rel_dir / name).as_posix()
-            if _skip_dir(root, current / name, rel):
+            if _skip_dir(root, sub_path, rel):
                 continue
-            if _is_ignored(specs, rel, is_dir=True):
+            if _is_ignored(specs, sub_path, is_dir=True):
                 continue
             kept_dirs.append(name)
+            specs_by_dir[sub_path] = specs
         dirnames[:] = kept_dirs
         for name in sorted(filenames):
             source = _consider_file(root, current, rel_dir, name, specs, tracked_env)
@@ -238,7 +244,9 @@ def extract_auth_context(files: list[SourceFile]) -> str:
             continue
         seen.add(key)
         lines.append(f"{path}:{line}: {text}")
-    return _cap_text("\n".join(lines), _AUTH_LIMIT, "\n…[truncated]")
+    from vibeguard.deterministic import mask_secrets
+
+    return _cap_text(mask_secrets("\n".join(lines)), _AUTH_LIMIT, "\n…[truncated]")
 
 
 def extract_units(files: list[SourceFile]) -> list[CodeUnit]:
@@ -304,30 +312,68 @@ def _is_env_name(name: str) -> bool:
     return name == ".env" or name.startswith(".env.")
 
 
-def _ignore_specs(root: Path) -> list[pathspec.PathSpec]:
-    specs: list[pathspec.PathSpec] = []
-    for name in (".gitignore", ".vibeguardignore"):
-        path = root / name
+def _git_toplevel(root: Path) -> Path | None:
+    try:
+        proc = _git(root, ["rev-parse", "--show-toplevel"])
+    except CollectorError:
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = proc.stdout.strip()
+    if not raw:
+        return None
+    top = Path(raw).resolve()
+    if not root.is_relative_to(top):
+        return None
+    return top
+
+
+def _ancestor_gitignores(root: Path) -> list[tuple[Path, pathspec.PathSpec]]:
+    git_root = _git_toplevel(root)
+    if git_root is None or git_root == root:
+        return []
+    specs: list[tuple[Path, pathspec.PathSpec]] = []
+    current = git_root
+    for part in root.relative_to(git_root).parts[:-1]:
+        specs.extend(_ignore_specs(current, (".gitignore",)))
+        current = current / part
+    specs.extend(_ignore_specs(current, (".gitignore",)))
+    return specs
+
+
+def _ignore_specs(
+    directory: Path,
+    names: tuple[str, ...] = (".gitignore", ".vibeguardignore"),
+) -> list[tuple[Path, pathspec.PathSpec]]:
+    specs: list[tuple[Path, pathspec.PathSpec]] = []
+    for name in names:
+        path = directory / name
         if not path.is_file():
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
+        except (OSError, UnicodeDecodeError):
             continue
         # pathspec still accepts the gitwildmatch id; it warns that the name moved.
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="GitWildMatchPattern", category=DeprecationWarning)
-            specs.append(pathspec.PathSpec.from_lines("gitwildmatch", lines))
+            specs.append((directory, pathspec.PathSpec.from_lines("gitwildmatch", lines)))
     return specs
 
 
-def _is_ignored(specs: list[pathspec.PathSpec], rel: str, *, is_dir: bool) -> bool:
-    if not specs or not rel or rel == ".":
+def _is_ignored(specs: list[tuple[Path, pathspec.PathSpec]], target: Path, *, is_dir: bool) -> bool:
+    if not specs:
         return False
-    candidates = [rel]
-    if is_dir and not rel.endswith("/"):
-        candidates.append(rel + "/")
-    return any(spec.match_file(candidate) for spec in specs for candidate in candidates)
+    for base_dir, spec in specs:
+        if not target.is_relative_to(base_dir):
+            continue
+        rel = target.relative_to(base_dir).as_posix()
+        if not rel or rel == ".":
+            continue
+        candidates = (rel, rel + "/") if is_dir and not rel.endswith("/") else (rel,)
+        if any(spec.match_file(candidate) for candidate in candidates):
+            return True
+    return False
 
 
 def _tracked_env_files(root: Path) -> set[str] | None:
@@ -357,20 +403,20 @@ def _consider_file(
     current: Path,
     rel_dir: Path,
     name: str,
-    specs: list[pathspec.PathSpec],
+    specs: list[tuple[Path, pathspec.PathSpec]],
     tracked_env: set[str] | None,
 ) -> SourceFile | None:
     if name in _SKIPPED_FILES or name.lower().endswith(".min.js"):
         return None
     rel = name if rel_dir == Path(".") else (rel_dir / name).as_posix()
+    abs_path = current / name
     language = _language_for(Path(name))
-    ignored = _is_ignored(specs, rel, is_dir=False)
+    ignored = _is_ignored(specs, abs_path, is_dir=False)
     if language == Language.ENV and tracked_env is not None:
         if rel not in tracked_env and ignored:
             return None
     elif ignored:
         return None
-    abs_path = current / name
     try:
         info = abs_path.lstat()
     except OSError as exc:
@@ -449,6 +495,12 @@ def _diff_against_base(root: Path, base: str) -> tuple[str, str | None]:
         return merged.stdout, None
     err = merged.stderr.lower()
     if "unknown option" in err or "unrecognized" in err or "usage:" in err:
+        mb = _git(root, ["merge-base", base, "HEAD"])
+        if mb.returncode == 0 and mb.stdout.strip():
+            fallback = _git(root, ["diff", "-U0", mb.stdout.strip()])
+            if fallback.returncode != 0:
+                return "", f"git diff failed for base {base!r}: {fallback.stderr.strip()}"
+            return fallback.stdout, None
         committed = _git(root, ["diff", "-U0", f"{base}...HEAD"])
         worktree = _git(root, ["diff", "-U0", "HEAD"])
         if committed.returncode != 0 or worktree.returncode != 0:
@@ -609,7 +661,7 @@ def _fastapi_hits(source: SourceFile) -> list[tuple[str, int, str]]:
 def _express_hits(source: SourceFile) -> list[tuple[str, int, str]]:
     hits: list[tuple[str, int, str]] = []
     text = source.text
-    for match in re.finditer(r"\b(?:app|router|server|api)\.use\s*\(", text):
+    for match in re.finditer(r"\b([A-Za-z_][\w]*)\.use\s*\(", text):
         call = _call_at(text, match.end() - 1)
         if call is not None and _AUTHISH.search(call):
             hits.append(_stmt_hit(source.path, text, match.start(), match.end() - 1))
@@ -623,12 +675,11 @@ def _stmt_hit(path: str, text: str, start: int, paren: int) -> tuple[str, int, s
 
 
 def _signature_hits(source: SourceFile) -> list[tuple[str, int, str]]:
-    parser = _parser_for(source)
-    if parser is None:
+    root = parse_root(source)
+    if root is None:
         return []
-    tree = parser.parse(source.text.encode("utf-8"))
     hits: list[tuple[str, int, str]] = []
-    for node in _walk(tree.root_node):
+    for node in _walk(root):
         name: str | None = None
         line = node.start_point[0] + 1
         if source.language == Language.PYTHON and node.type == "function_definition":
@@ -723,12 +774,11 @@ def _is_test_unit_path(path: str) -> bool:
 
 
 def _extract_python(source: SourceFile) -> list[CodeUnit]:
-    parser = _parser_for(source)
-    if parser is None:
+    root = parse_root(source)
+    if root is None:
         return []
-    tree = parser.parse(source.text.encode("utf-8"))
     units: list[CodeUnit] = []
-    _visit_python(tree.root_node, source, units)
+    _visit_python(root, source, units)
     return units
 
 
@@ -801,11 +851,9 @@ def _first_string_arg(call: Node) -> str | None:
 
 
 def _extract_script(source: SourceFile) -> list[CodeUnit]:
-    parser = _parser_for(source)
-    if parser is None:
+    root = parse_root(source)
+    if root is None:
         return []
-    tree = parser.parse(source.text.encode("utf-8"))
-    root = tree.root_node
     use_server = _is_use_server(root)
     app_path = _app_route_path(source.path)
     pages_path = _pages_api_route(source.path)
@@ -876,8 +924,6 @@ def _express_unit(source: SourceFile, call: Node) -> CodeUnit | None:
     prop = func.child_by_field_name("property")
     if obj is None or prop is None or obj.type != "identifier":
         return None
-    if _text(obj) not in _EXPRESS_OBJECTS:
-        return None
     method = _text(prop).lower()
     if method not in _EXPRESS_METHODS:
         return None
@@ -887,6 +933,14 @@ def _express_unit(source: SourceFile, call: Node) -> CodeUnit | None:
     route_path = _script_string(args.named_children[0])
     if route_path is None:
         return None
+    if _text(obj) not in _EXPRESS_OBJECTS:
+        if not route_path.startswith("/"):
+            return None
+        if len(args.named_children) < 2 or args.named_children[-1].type not in {
+            "arrow_function",
+            "function_expression",
+        }:
+            return None
     http_method = method.upper()
     name = _express_name(http_method, route_path, args)
     return _make_unit(source, call, name=name, kind="route", http_method=http_method, route_path=route_path)

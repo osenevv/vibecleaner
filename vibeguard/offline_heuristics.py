@@ -7,12 +7,12 @@ of the offline cache key, so a heuristic change cannot reuse stale scores.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
 
-from vibeguard.cache import OFFLINE_MODEL
+from vibeguard.cache import OFFLINE_MODEL, ChunkVerdict
 from vibeguard.models import CodeUnit
 
-OFFLINE_HEURISTIC_VERSION = "3"
+OFFLINE_HEURISTIC_VERSION = "4"
 
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE", "ACTION"}
 _MUTATING_CALL = re.compile(
@@ -74,7 +74,7 @@ _UNTRUSTED_EXPR = re.compile(
     r"(user_|user\.|"
     r"req(?:uest)?\s*\.\s*(?:body|query|params|form|json|args|data|values)\b|"
     r"req\.|request\.|"
-    r"\b(?:prompt|body|input|message|payload|persona)\b(?!\s*:)|"
+    r"\b(?:prompt|body|input|message|payload|persona|\w*instructions)\b(?!\s*:)|"
     r"\.function\s*\.\s*arguments\b|"
     r"\btool_calls?\b|"
     r"\[\s*['\"]arguments['\"]\s*\])",
@@ -85,7 +85,8 @@ _UNAUTH_REJECTION = re.compile(
     r"|\bHTTPException\s*\([^)]{0,300}\bstatus_code\s*=\s*40[13]\b"
     r"|status(?:_code)?\s*[:=]\s*40[13]\b"
     r"|\.status\s*\(\s*40[13]\s*\)"
-    r"|\babort\s*\(\s*40[13]\s*\)",
+    r"|\babort\s*\(\s*40[13]\s*\)"
+    r"|\braise\s+PermissionError\b",
     re.IGNORECASE,
 )
 _AUTH_PARTS = frozenset(
@@ -140,7 +141,6 @@ _AUTH_EXTRA = frozenset(
     {
         "authentication",
         "authenticate",
-        "authenticated",
         "authenticating",
         "authorization",
         "authorizing",
@@ -207,6 +207,14 @@ _CREDENTIAL_PARTS = frozenset(
         "pin",
         "password",
         "secret",
+        "operator",
+        "member",
+        "staff",
+        "admin",
+        "tenant",
+        "account",
+        "owner",
+        "role",
     }
 )
 _CREDENTIAL_CALL = re.compile(
@@ -314,7 +322,7 @@ _ROUTE_OBJECT = re.compile(
     re.IGNORECASE,
 )
 _EXPRESS_ROUTE_OBJECT = re.compile(
-    r"\b([A-Za-z_][\w]*)\s*\.\s*(?:get|post|put|patch|delete)\s*\(\s*['\"]",
+    r"\b([A-Za-z_][\w]*)\s*\.\s*(?:get|post|put|patch|delete|all)\s*\(\s*['\"]",
     re.IGNORECASE,
 )
 _APP_ASSIGN = re.compile(r"\b([A-Za-z_][\w]*)\s*=\s*(?:APIRouter|FastAPI)\s*\(")
@@ -483,13 +491,6 @@ _HTTP_SINK = re.compile(
     re.IGNORECASE,
 )
 
-@dataclass
-class _ChunkScores:
-    scores: dict[str, dict[str, float]]
-    severity: dict[str, float]
-    input_tokens: int
-
-
 class OfflineHeuristicBackend:
     """Deterministic zero-network fallback. Prefers missing a bug over a false alarm."""
 
@@ -502,7 +503,7 @@ class OfflineHeuristicBackend:
         """Remember every unit in the scan so a caller can be scored via its callee."""
         self._catalog = tuple(units)
 
-    async def judge_chunk(self, auth_context: str, units: list[CodeUnit]) -> _ChunkScores:
+    async def judge_chunk(self, auth_context: str, units: list[CodeUnit]) -> ChunkVerdict:
         scores: dict[str, dict[str, float]] = {}
         severity: dict[str, float] = {}
         for unit in units:
@@ -516,7 +517,7 @@ class OfflineHeuristicBackend:
             }
             scores[unit.unit_id] = unit_scores
             severity[unit.unit_id] = module_risk_from_scores(unit_scores)
-        return _ChunkScores(scores=scores, severity=severity, input_tokens=0)
+        return ChunkVerdict(scores=scores, severity=severity, input_tokens=0)
 
 
 def _score_missing_auth(unit: CodeUnit, auth_context: str) -> float:
@@ -554,6 +555,9 @@ def _is_entrypoint(unit: CodeUnit) -> bool:
     return bool(_ROUTE_DECORATOR.search(unit.source))
 
 
+_HTTP_CLIENT_OBJECTS = frozenset({"axios", "requests", "httpx"})
+
+
 def _has_local_auth(source: str) -> bool:
     code = _auth_code(source)
     if _LOCAL_AUTH.search(code) or _ANNOTATED_USER_DEPENDS.search(code) or _NAMED_AUTH_PARAM.search(code):
@@ -562,9 +566,45 @@ def _has_local_auth(source: str) -> bool:
         return True
     if _has_auth_wrapper(code):
         return True
+    if _route_middleware_has_auth(source):
+        return True
     if _dependencies_are_auth(code):
         return True
     return _span_has_auth_dependency(code)
+
+
+def _route_middleware_has_auth(source: str) -> bool:
+    stripped = _strip_comments(source)
+    for match in _EXPRESS_ROUTE_OBJECT.finditer(stripped):
+        if match.group(1).lower() in _HTTP_CLIENT_OBJECTS:
+            continue
+        if re.search(r"\b(?:await|return)\s+$", stripped[: match.start()]):
+            continue
+        call = _call_from(stripped, match.start())
+        if call is None:
+            continue
+        args = _split_top(call[1:-1], ",")
+        if len(args) < 3:
+            continue
+        path_arg = args[0].strip()
+        if len(path_arg) < 2 or path_arg[0] not in {"'", '"', "`"}:
+            continue
+        if not path_arg[1:].startswith(("/", "*")):
+            continue
+        last = args[-1].strip()
+        if not last or last.startswith(("{", "[")):
+            continue
+        for raw in args[1:-1]:
+            mid = raw.strip()
+            ident = re.match(r"^([A-Za-z_][\w]*(?:\s*\.\s*[A-Za-z_][\w]*)*)(.*)$", mid, re.DOTALL)
+            if ident is None:
+                continue
+            name, rest = ident.group(1), ident.group(2).strip()
+            if rest and not (rest.startswith("(") and _balanced(rest, 0, "(", ")") == rest):
+                continue
+            if _looks_like_auth_name(name):
+                return True
+    return False
 
 
 def _auth_context_covers(unit: CodeUnit, auth_context: str) -> bool:
@@ -940,6 +980,15 @@ def _path_auth_covers(route_path: str | None, auth_context: str) -> bool:
                 continue
             if pattern.startswith("/") and _path_covered(pattern, path):
                 return True
+        for match in _ROUTER_USE.finditer(code):
+            call = _balanced(code, match.end() - 1, "(", ")")
+            if (
+                call
+                and _call_has_auth_callable(call)
+                and any(item.startswith("/") for item in _QUOTED.findall(call))
+                and _mount_covers(call, route_path)
+            ):
+                return True
         if _dependencies_are_auth(code):
             for prefix in _PREFIX.findall(code):
                 norm = _normalize_path(prefix)
@@ -1112,7 +1161,8 @@ def _io_inside_loop(source: str) -> bool:
         before = source[max(0, match.start() - 40) : match.start()]
         if "Promise.all" in before:
             continue
-        window = source[match.start() : match.start() + 500]
+        call = _call_from(source, match.start())
+        window = call if call is not None else source[match.start() : match.start() + 500]
         if _IO_CALL.search(window):
             return True
     return False
@@ -1221,24 +1271,46 @@ def _rhs_is_client(rhs: str, roots: set[str]) -> bool:
     return any(re.search(rf"(?<!\.)\b{re.escape(root)}\b", rhs) for root in roots)
 
 
-def _propagate_names(source: str, exprs: list[str], names: set[str]) -> None:
-    assignments = list(
-        re.finditer(
-            r"(?:(?:const|let|var)\s+)?(?<![!=<>])\b([A-Za-z_][\w]*)\s*=(?!=)\s*([^;\n]+)",
-            source,
-        )
-    )
+_ASSIGNMENT = re.compile(
+    r"(?:(?:const|let|var)\s+)?(?<![!=<>])\b([A-Za-z_][\w]*)\s*=(?!=)\s*([^;\n]+)"
+)
+_NOT_A_NAME = frozenset({"if", "for", "while", "return", "await"})
+
+
+def _absorb_assignments(
+    source: str,
+    names: set[str],
+    rhs_is_tainted: Callable[[str, set[str]], bool],
+    skip: frozenset[str] = frozenset(),
+) -> None:
+    assignments = list(_ASSIGNMENT.finditer(source))
     for _ in range(3):
         added = False
         for match in assignments:
             lhs = match.group(1)
-            if lhs in names or lhs in {"if", "for", "while", "return", "await"}:
+            if lhs in names or lhs in skip:
                 continue
-            if _text_has_taint(match.group(2), exprs, names):
+            rhs = match.group(2)
+            if rhs.strip().startswith("("):
+                paren_idx = source.find("(", match.start(2))
+                if paren_idx >= 0:
+                    span = _balanced(source, paren_idx, "(", ")")
+                    if span is not None:
+                        rhs = span
+            if rhs_is_tainted(rhs, names):
                 names.add(lhs)
                 added = True
         if not added:
             return
+
+
+def _propagate_names(source: str, exprs: list[str], names: set[str]) -> None:
+    _absorb_assignments(
+        source,
+        names,
+        lambda rhs, bound: _text_has_taint(rhs, exprs, bound),
+        _NOT_A_NAME,
+    )
 
 
 def _tainted_reaches_sink(source: str, exprs: list[str], names: set[str]) -> bool:
@@ -1328,24 +1400,8 @@ def _expression_is_untrusted(expr: str, bound: set[str] | None = None) -> bool:
 
 
 def _untrusted_bound_names(source: str, seeds: set[str] | None = None) -> set[str]:
-    assignments = list(
-        re.finditer(
-            r"(?:(?:const|let|var)\s+)?(?<![!=<>])\b([A-Za-z_][\w]*)\s*=(?!=)\s*([^;\n]+)",
-            source,
-        )
-    )
     names: set[str] = set(seeds or ())
-    for _ in range(3):
-        added = False
-        for match in assignments:
-            lhs = match.group(1)
-            if lhs in names:
-                continue
-            if _expression_is_untrusted(match.group(2), names):
-                names.add(lhs)
-                added = True
-        if not added:
-            break
+    _absorb_assignments(source, names, lambda rhs, bound: _expression_is_untrusted(rhs, bound))
     return names
 
 
@@ -1898,10 +1954,9 @@ def _arg_for_param(args: str, params: list[str], name: str) -> str | None:
             return binding.group(2).strip()
         if binding is None:
             positional.append(part)
-    try:
-        index = params.index(name)
-    except ValueError:
+    if name not in params:
         return None
+    index = params.index(name)
     if index < len(positional):
         return positional[index]
     return None

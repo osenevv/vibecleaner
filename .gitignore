@@ -5,3 +5,6 @@ __pycache__/
 .vibeguard_cache.json
 build/
 dist/
+VIBEGUARD_DESLOP.md
+VIBEGUARD_STATES.md
+VIBEGUARD_RUN.md

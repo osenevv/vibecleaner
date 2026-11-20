@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Iterator
 
 import tree_sitter_python
@@ -14,19 +15,34 @@ from vibeguard.models import SourceFile
 _PY_LANGUAGE = Language(tree_sitter_python.language())
 _TS_LANGUAGE = Language(tree_sitter_typescript.language_typescript())
 _TSX_LANGUAGE = Language(tree_sitter_typescript.language_tsx())
-_PY_PARSER = Parser(_PY_LANGUAGE)
-_TS_PARSER = Parser(_TS_LANGUAGE)
-_TSX_PARSER = Parser(_TSX_LANGUAGE)
+_THREAD_PARSERS = threading.local()
 
 
 def parser_for(source: SourceFile) -> Parser | None:
     if source.language == SourceLanguage.PYTHON:
-        return _PY_PARSER
-    if source.language == SourceLanguage.TSX or source.path.endswith(".jsx"):
-        return _TSX_PARSER
-    if source.language in {SourceLanguage.TYPESCRIPT, SourceLanguage.JAVASCRIPT}:
-        return _TS_PARSER
-    return None
+        key, language = "python", _PY_LANGUAGE
+    elif source.language == SourceLanguage.TSX or source.path.endswith(".jsx"):
+        key, language = "tsx", _TSX_LANGUAGE
+    elif source.language in {SourceLanguage.TYPESCRIPT, SourceLanguage.JAVASCRIPT}:
+        key, language = "typescript", _TS_LANGUAGE
+    else:
+        return None
+    cache: dict[str, Parser] | None = getattr(_THREAD_PARSERS, "parsers", None)
+    if cache is None:
+        cache = {}
+        _THREAD_PARSERS.parsers = cache
+    parser = cache.get(key)
+    if parser is None:
+        parser = Parser(language)
+        cache[key] = parser
+    return parser
+
+
+def parse_root(source: SourceFile) -> Node | None:
+    parser = parser_for(source)
+    if parser is None:
+        return None
+    return parser.parse(source.text.encode("utf-8")).root_node
 
 
 def node_text(node: Node) -> str:

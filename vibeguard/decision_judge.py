@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
-from typing import Any, Protocol
+from collections.abc import Mapping
+from typing import Literal, Protocol, TypedDict
 
-from vibeguard.cache import GEMINI_MODEL, OFFLINE_MODEL, DecisionCache
+from vibeguard.cache import GEMINI_MODEL, OFFLINE_MODEL, ChunkVerdict, DecisionCache, _finite_number
 from vibeguard.models import (
     DEFAULT_THRESHOLD,
     LAYER2_KEY_SUFFIX,
@@ -23,7 +23,8 @@ from vibeguard.models import (
     Severity,
 )
 from vibeguard.offline_heuristics import OfflineHeuristicBackend, module_risk_from_scores
-from vibeguard.settings import api_key
+from vibeguard.redact import redact_secrets
+from vibeguard.settings import api_key, genai_client
 
 log = logging.getLogger(__name__)
 
@@ -47,11 +48,48 @@ class DecisionAPIError(RuntimeError):
         self.code = code
 
 
-@dataclass
-class ChunkVerdict:
-    scores: dict[str, dict[str, float]]
-    severity: dict[str, float]
-    input_tokens: int
+class _NoulCriteria(TypedDict):
+    true_description: str
+    false_description: str
+
+
+class _NoulQuestion(TypedDict):
+    type: Literal["noul"]
+    instructions: str
+    criteria: _NoulCriteria
+
+
+class _ScoreQuestion(TypedDict):
+    type: Literal["score"]
+    instructions: str
+    criteria: list[str]
+
+
+_Question = _NoulQuestion | _ScoreQuestion
+
+
+class _DecisionPayload(TypedDict):
+    model: str
+    input: str
+    questions: dict[str, _Question]
+
+
+class _DecisionCreate(Protocol):
+    async def create(
+        self,
+        *,
+        model: str,
+        input: str,
+        questions: Mapping[str, _Question],
+    ) -> object: ...
+
+
+class _DecisionAio(Protocol):
+    decisions: _DecisionCreate
+
+
+class _DecisionClient(Protocol):
+    aio: _DecisionAio
 
 
 class DecisionBackend(Protocol):
@@ -73,12 +111,13 @@ def require_threshold(threshold: float) -> float:
         value = float(threshold)
     except (TypeError, ValueError) as exc:
         raise DecisionAPIError("threshold must be a probability between 0.01 and 0.99") from exc
-    if value != value or value in (float("inf"), float("-inf")) or not 0.01 <= value <= 0.99:
+    number = _finite_number(value)
+    if number is None or not 0.01 <= number <= 0.99:
         raise DecisionAPIError(
             f"threshold {threshold} is outside 0.01..0.99. "
             "noul never returns 0 or 1, so a cutoff outside that range cannot fail the scan."
         )
-    return value
+    return number
 
 
 def estimate_tokens(text: str) -> int:
@@ -103,14 +142,14 @@ def format_module(unit: CodeUnit) -> str:
     return (
         " ".join(meta)
         + "\n<source>\n"
-        + unit.source
+        + redact_secrets(unit.source)
         + "\n</source>\n"
         + f"[/{unit.label}]"
     )
 
 
-def _questions_for(label: str) -> dict[str, dict[str, Any]]:
-    questions: dict[str, dict[str, Any]] = {}
+def _questions_for(label: str) -> dict[str, _Question]:
+    questions: dict[str, _Question] = {}
     for rule_id in LAYER2_RULE_IDS:
         spec = RULES[rule_id]
         key = f"{label}__{LAYER2_KEY_SUFFIX[rule_id]}"
@@ -177,15 +216,15 @@ def chunk_units(
     return chunks
 
 
-def build_payload(auth_context: str, units: list[CodeUnit]) -> dict[str, Any]:
+def build_payload(auth_context: str, units: list[CodeUnit]) -> _DecisionPayload:
     """Decisions API body: ``{model, input, questions}``."""
     body = "\n\n".join(format_module(unit) for unit in units)
-    questions: dict[str, dict[str, Any]] = {}
+    questions: dict[str, _Question] = {}
     for unit in units:
         questions.update(_questions_for(unit.label))
     return {
         "model": DECISION_MODEL,
-        "input": "[GLOBAL_AUTH_CONTEXT]\n" + auth_context + "\n\n" + body,
+        "input": "[GLOBAL_AUTH_CONTEXT]\n" + redact_secrets(auth_context) + "\n\n" + body,
         "questions": questions,
     }
 
@@ -208,7 +247,7 @@ def units_to_skip(units: list[CodeUnit], layer1_findings: list[Finding]) -> set[
     return skipped
 
 
-def _lookup(obj: Any, key: str) -> Any:
+def _lookup(obj: object, key: str) -> object:
     """Read ``key`` from a dict-style or attribute-style response object."""
     if obj is None:
         return None
@@ -226,28 +265,20 @@ def _lookup(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
-def _as_float(value: Any) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, (int, float)):
-        number = float(value)
-    elif isinstance(value, str):
+def _as_float(value: object) -> float | None:
+    if isinstance(value, str):
         try:
-            number = float(value)
+            value = float(value)
         except ValueError:
             return None
-    else:
-        return None
-    if number != number or number in (float("inf"), float("-inf")):
-        return None
-    return number
+    return _finite_number(value)
 
 
 def _clamp_probability(value: float) -> float:
     return min(0.99, max(0.01, value))
 
 
-def _iter_answers(answers: Any) -> list[tuple[str, Any]]:
+def _iter_answers(answers: object) -> list[tuple[str, object]]:
     if answers is None:
         return []
     if isinstance(answers, dict):
@@ -287,14 +318,12 @@ def _error_code(exc: BaseException) -> str | None:
 
 
 def _is_timeout(exc: BaseException) -> bool:
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+    if isinstance(exc, TimeoutError):
         return True
     return "timeout" in type(exc).__name__.lower()
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
-        return False
     if _is_timeout(exc):
         return True
     status = _status_code(exc)
@@ -311,7 +340,7 @@ def _to_api_error(exc: BaseException, attempts: int) -> DecisionAPIError:
     return DecisionAPIError(f"{prefix}: {exc}", status_code=status, code=_error_code(exc))
 
 
-def _verdict_from_response(result: Any, units: list[CodeUnit], model_input: str) -> ChunkVerdict:
+def _verdict_from_response(result: object, units: list[CodeUnit], model_input: str) -> ChunkVerdict:
     answers = _lookup(result, "answers")
     pairs = _iter_answers(answers)
     if not pairs:
@@ -352,7 +381,7 @@ class GeminiDecisionBackend:
     def __init__(
         self,
         api_key: str,
-        client: Any = None,
+        client: _DecisionClient | None = None,
         *,
         max_attempts: int = 3,
         base_delay: float = 0.5,
@@ -362,14 +391,9 @@ class GeminiDecisionBackend:
         self._max_attempts = max(1, max_attempts)
         self._base_delay = max(0.0, base_delay)
 
-    def _ensure_client(self) -> Any:
+    def _ensure_client(self) -> _DecisionClient:
         if self._client is None:
-            from google import genai
-
-            self._client = genai.Client(
-                api_key=self.api_key,
-                http_options={"api_version": "v1beta"},
-            )
+            self._client = genai_client(self.api_key, api_version="v1beta")
         return self._client
 
     async def judge_chunk(self, auth_context: str, units: list[CodeUnit]) -> ChunkVerdict:
@@ -377,7 +401,7 @@ class GeminiDecisionBackend:
         result = await self._create_with_retry(payload)
         return _verdict_from_response(result, units, payload["input"])
 
-    async def _create_with_retry(self, payload: dict[str, Any]) -> Any:
+    async def _create_with_retry(self, payload: _DecisionPayload) -> object:
         client = self._ensure_client()
         delay = self._base_delay
         last: BaseException | None = None
@@ -388,8 +412,6 @@ class GeminiDecisionBackend:
                     input=payload["input"],
                     questions=payload["questions"],
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 last = exc
                 if not _is_retryable(exc) or attempt == self._max_attempts:
@@ -419,7 +441,7 @@ def _finding_message(spec: RuleSpec, unit: CodeUnit) -> str:
 
 
 def _snippet(unit: CodeUnit, limit: int = 500) -> str:
-    text = unit.source.strip()
+    text = redact_secrets(unit.source.strip())
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
@@ -478,8 +500,6 @@ async def judge_async(
         async with semaphore:
             try:
                 verdict = await backend.judge_chunk(ctx.auth_context, chunk)
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 ids = ", ".join(unit.unit_id for unit in chunk)
                 message = f"{type(exc).__name__}: {exc} [{ids}]"

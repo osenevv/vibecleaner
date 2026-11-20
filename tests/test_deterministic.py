@@ -47,10 +47,11 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _init_repo(repo: Path) -> None:
-    _git(repo, "init")
+    from gitutil import init_git
+
+    init_git(repo)
     _git(repo, "config", "user.email", "dev@example.com")
     _git(repo, "config", "user.name", "Dev")
-    _git(repo, "config", "commit.gpgsign", "false")
 
 
 def _sf(path: str, text: str, language: Language | None = None) -> SourceFile:
@@ -1263,6 +1264,22 @@ def test_redaction_keeps_neutral_keys_and_hides_env_secrets() -> None:
     assert debug[0].snippet is not None
     assert "DEBUG=false" in debug[0].snippet
 
+    large_plain = "b" * 80_000
+    assert mask_secrets(large_plain) == large_plain
+
+    dotted_secret = ".a" * 40_000 + "; secret_key=super_secret_1234"
+    dotted_masked = mask_secrets(dotted_secret)
+    assert "super_secret_1234" not in dotted_masked
+    assert f"<redacted:{len('super_secret_1234')} chars>" in dotted_masked
+
+    indexed = mask_secrets('foo[0].secret = "my_secret_1234"')
+    assert "my_secret_1234" not in indexed
+    assert f"<redacted:{len('my_secret_1234')} chars>" in indexed
+
+    optional = mask_secrets('foo?.api_key = "my_secret_1234"')
+    assert "my_secret_1234" not in optional
+    assert f"<redacted:{len('my_secret_1234')} chars>" in optional
+
 
 def test_prose_tics_flag_model_residue_and_skip_technical_writing() -> None:
     drafted = "\n".join(
@@ -1298,3 +1315,89 @@ def test_prose_tics_flag_model_residue_and_skip_technical_writing() -> None:
     assert detect_prose_tics(_sf("README.md", technical)) == []
     assert detect_prose_tics(_sf("api/orders.py", "def f():\n    # I hope this helps\n    return 1\n")) == []
     assert detect_prose_tics(_sf("CHANGELOG.md", "I hope this helps!\n")) == []
+
+    slop_doc = "\n".join(
+        [
+            "This cutting-edge game-changer will supercharge your workflow.",
+            "The release marks a pivotal moment, ushering in a new era of deploys.",
+            "Let that sink in. Here's what nobody tells you about caching.",
+            "In today's ever-evolving digital landscape, latency matters.",
+            "Experts agree this is widely regarded as the best pattern.",
+            "Plot twist: let me walk you through the schema.",
+        ]
+    )
+    slop_hits = detect_prose_tics(_sf("docs/launch.md", slop_doc))
+    assert {finding.line for finding in slop_hits} == {1, 2, 3, 4, 5, 6}
+
+
+def test_extract_auth_context_masks_secret_literals() -> None:
+    stripe_key = "sk_" + "live_" + "0123456789abcdef01234567"
+    code = f"def require_auth(api_key: str = {stripe_key!r}):\n    return api_key\n"
+    text = extract_auth_context([_sf("auth.py", code)])
+    assert "require_auth" in text
+    assert stripe_key not in text
+    assert "<redacted:" in text
+
+
+def test_extract_custom_express_routers_and_gatekeeper_middleware() -> None:
+    js = "\n".join(
+        [
+            "donorNotes.use(gatekeeper)",
+            "donorNotes.post('/notes', async (req, res) => {",
+            "  await db.insert(req.body)",
+            "  return res.json({ ok: true })",
+            "})",
+            "listingRoutes.patch('/:id', function updateListing(req, res) {",
+            "  return db.update(req.params.id)",
+            "})",
+            "const cached = cache.get('session:1')",
+            "const fallback = cache.get('/session', defaultObj)",
+        ]
+    )
+    source = _sf("routes/notes.js", js)
+    auth_ctx = extract_auth_context([source])
+    assert "donorNotes.use(gatekeeper)" in auth_ctx
+
+    units = extract_units([source])
+    by_name = {unit.name: unit for unit in units}
+    assert "POST /notes" in by_name
+    assert by_name["POST /notes"].kind == "route"
+    assert by_name["POST /notes"].http_method == "POST"
+    assert by_name["POST /notes"].route_path == "/notes"
+    assert "updateListing" in by_name
+    assert by_name["updateListing"].kind == "route"
+    assert by_name["updateListing"].http_method == "PATCH"
+    assert by_name["updateListing"].route_path == "/:id"
+    assert len(units) == 2
+
+
+def test_walk_repo_nested_and_parent_gitignore_scoping(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    (tmp_path / ".vibeguardignore").write_text("sub/\n", encoding="utf-8")
+
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".gitignore").write_text("local_secret.py\nignored_sub/\n", encoding="utf-8")
+    (sub / "keep.py").write_text("x = 1\n", encoding="utf-8")
+    (sub / "parent.ignored").write_text("nope = 1\n", encoding="utf-8")
+    (sub / "local_secret.py").write_text("nope = 2\n", encoding="utf-8")
+    (sub / "ignored_sub").mkdir()
+    (sub / "ignored_sub" / "hidden.py").write_text("nope = 3\n", encoding="utf-8")
+
+    sibling = tmp_path / "other"
+    sibling.mkdir()
+    (sibling / "local_secret.py").write_text("ok = 1\n", encoding="utf-8")
+
+    # Scanning repo root ignores sub/ via root .vibeguardignore and sibling/*.ignored via .gitignore.
+    root_paths = {item.path for item in walk_repo(tmp_path)}
+    assert "other/local_secret.py" in root_paths
+    assert "sub/keep.py" not in root_paths
+
+    # Scanning sub directly ignores parent *.ignored and sub-local ignores,
+    # while NOT applying ancestor .vibeguardignore (which contains sub/).
+    sub_paths = {item.path for item in walk_repo(sub)}
+    assert "keep.py" in sub_paths
+    assert "parent.ignored" not in sub_paths
+    assert "local_secret.py" not in sub_paths
+    assert "ignored_sub/hidden.py" not in sub_paths

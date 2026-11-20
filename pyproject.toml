@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
 
 [project]
-name = "vibeguard"
+name = "vibecleaner"
 version = "0.1.0"
 description = "Pre-ship security & anti-slop harness for AI-generated apps (tree-sitter gate + gemini-decision-1 atomic checks)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Vladimir Osenev" }]
 dependencies = [
     "tree-sitter>=0.23,<0.27",
@@ -19,14 +19,33 @@ dependencies = [
     "rich>=13.7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/osenevv/vibecleaner"
+Repository = "https://github.com/osenevv/vibecleaner"
+Issues = "https://github.com/osenevv/vibecleaner/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "hypothesis>=6"]
 
 [project.scripts]
+vibecleaner = "vibeguard.cli:main"
 vibeguard = "vibeguard.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["vibeguard*"]
+[tool.hatch.build.targets.wheel]
+packages = ["vibeguard"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"integrations/antigravity/vibeguard" = "vibeguard/_bundled/antigravity/vibeguard"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/vibeguard",
+    "/integrations/antigravity/vibeguard",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]

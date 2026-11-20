@@ -1,12 +1,8 @@
 """Lexical LLM-prose tells in reader-facing docs.
 
-The patterns are the high-precision slice of the declauding register, v0.13.0
-(https://github.com/oaustegard/claude-skills/releases/tag/declauding-v0.13.0,
-MIT). That skill's linter also flags shapes that ordinary technical writing
-uses on purpose: bold-label lists, "X, not Y", Title Case, short paragraphs,
-triads, and "never". Those stay out. So do the parts that are not a detector:
-the rewrite, the embedding ranker, the structural model review, and the
-newcomer-read hook. A hit here is a candidate, the same contract as that linter.
+Combines high-precision deterministic rules from declauding, stop-slop,
+no-ai-slop, and anti-slop copywriting while skipping ordinary technical writing
+(bold-label lists, "X, not Y", Title Case, short paragraphs, and code spans).
 """
 
 from __future__ import annotations
@@ -53,8 +49,33 @@ _RULES: tuple[tuple[str, str, str], ...] = (
     ("throat-clearing", r"\b(?:let me|I'?ll)\s+(?:consult|check|search|pull up|recall)\s+my\b", "AI self-narration"),
     (
         "slop",
-        r"\b(?:delve|tapestry|testament to|navigate the complexities|in today'?s fast[- ]paced|realm of|seamless|plethora|myriad|unlock the|harness the|embark|dive deep|at the end of the day)\b",
+        r"\b(?:delve|tapestry|testament to|navigate the complexities|in today'?s fast[- ]paced|realm of|seamless|plethora|myriad|unlock the|harness the|embark|dive deep|at the end of the day|game[- ]changer|cutting[- ]edge|paradigm\s+shift|ever[- ]evolving|supercharge|multifaceted|next[- ]level|this\s+changes\s+everything)\b",
         "slop vocabulary",
+    ),
+    (
+        "puffery",
+        r"\b(?:ushering\s+in\s+a\s+new\s+era|marks?\s+a\s+pivotal\s+moment|plays?\s+a\s+vital\s+role|solidif(?:y|ies)\s+(?:its|their)\s+position|underscores?\s+(?:its|their)\s+significance)\b",
+        "significance inflation",
+    ),
+    (
+        "crutch",
+        r"\b(?:let\s+that\s+sink\s+in|make\s+no\s+mistake|here'?s\s+why\s+that\s+matters|the\s+uncomfortable\s+truth\s+is|what\s+most\s+people\s+get\s+wrong|here'?s\s+what\s+nobody\s+tells\s+you|the\s+part\s+everyone\s+misses|without\s+further\s+ado|let'?s\s+dive\s+in(?:to)?)\b",
+        "emphasis crutch or faux-insight setup",
+    ),
+    (
+        "runway",
+        r"\b(?:in\s+today'?s\s+(?:ever[- ]evolving|digital|modern|rapidly\s+changing)\s+(?:world|landscape|era)|in\s+an\s+era\s+of\s+rapid)\b",
+        "temporal runway cliché",
+    ),
+    (
+        "weasel",
+        r"\b(?:(?:experts|analysts)\s+agree|industry\s+(?:reports|observers)\s+(?:suggest|believe)|widely\s+regarded\s+as|trusted\s+by\s+thousands\s+of\s+teams|loved\s+by\s+customers\s+everywhere)\b",
+        "unsourced weasel attribution",
+    ),
+    (
+        "meta",
+        r"(?:^\s*(?:plot\s+twist|spoiler\s+alert|real\s+talk)\s*:|\b(?:let\s+me\s+walk\s+you\s+through|in\s+this\s+section,?\s*we'?ll)\b)",
+        "meta-commentary or theatrical pause",
     ),
     ("filler", r"\bdue\s+to\s+the\s+fact\s+that\b", "due to the fact that — use because"),
     ("filler", r"\bat\s+this\s+point\s+in\s+time\b", "at this point in time — use now"),
