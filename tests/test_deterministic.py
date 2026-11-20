@@ -1200,3 +1200,62 @@ def test_extract_units_keeps_short_sink_helpers() -> None:
     script_units = extract_units([_sf("bridge.ts", script)])
     assert {unit.name for unit in script_units} == {"pageBridge", "send", "save"}
     assert all(unit.kind == "function" for unit in script_units)
+
+
+def test_redaction_keeps_neutral_keys_and_hides_env_secrets() -> None:
+    openai = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0"
+    preserved = "\n".join(
+        [
+            "PORT=8080",
+            "DEBUG=false",
+            "author=hello-world-name",
+            "max_tokens=8192",
+            "token_count=123456",
+            "tokenizer=wordpiece-model",
+        ]
+    )
+    assert mask_secrets(preserved) == preserved
+
+    database = "postgres://u:p@h/db"
+    assigned = "\n".join(
+        [
+            f"OPENAI_API_KEY={openai}",
+            f"DATABASE_URL={database}",
+            f"NOTE=pre-{openai}",
+        ]
+    )
+    masked = mask_secrets(assigned)
+    assert "OPENAI_API_KEY=" in masked
+    assert "DATABASE_URL=" in masked
+    assert "NOTE=" in masked
+    assert openai not in masked
+    assert database not in masked
+    assert "pre-" not in masked
+    assert f"<redacted:{len(openai)} chars>" in masked
+    assert f"<redacted:{len(database)} chars>" in masked
+
+    neutral = _HIGH
+    assert len(neutral) >= 16
+    assert shannon_entropy(neutral) > 3.5
+    entropy = detect_secrets(_sf(".env", f"CACHE_BUSTER={neutral}\nPORT=8080\n"))
+    assert entropy[0].rule_id == "D1.env_file_committed"
+    assert entropy[0].snippet is not None
+    assert neutral not in entropy[0].snippet
+    assert "<redacted:" in entropy[0].snippet
+
+    api = detect_secrets(_sf(".env", f"OPENAI_API_KEY={openai}\nDEBUG=false\n"))
+    assert api[0].snippet is not None
+    assert openai not in api[0].snippet
+    assert "OPENAI_API_KEY=" in api[0].snippet
+
+    url = detect_secrets(_sf(".env", f"DATABASE_URL={database}\n"))
+    assert url[0].snippet is not None
+    assert database not in url[0].snippet
+    assert "u:p@" not in url[0].snippet
+
+    port = detect_secrets(_sf(".env", "PORT=8080\n"))
+    assert port[0].snippet is not None
+    assert "PORT=8080" in port[0].snippet
+    debug = detect_secrets(_sf(".env", "DEBUG=false\n"))
+    assert debug[0].snippet is not None
+    assert "DEBUG=false" in debug[0].snippet

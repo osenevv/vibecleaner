@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from vibeguard.cache import OFFLINE_MODEL
 from vibeguard.models import CodeUnit
 
-OFFLINE_HEURISTIC_VERSION = "2"
+OFFLINE_HEURISTIC_VERSION = "3"
 
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE", "ACTION"}
 _MUTATING_CALL = re.compile(
@@ -80,18 +80,142 @@ _UNTRUSTED_EXPR = re.compile(
     r"\[\s*['\"]arguments['\"]\s*\])",
     re.IGNORECASE,
 )
-_RESOURCE_DEPENDENCY = re.compile(
-    r"^(?:get_db|get_database|get_engine|get_connection|get_conn|"
-    r"get_session|get_async_session|get_db_session|get_settings|get_redis)$",
-    re.IGNORECASE,
-)
 _UNAUTH_REJECTION = re.compile(
-    r"HTTPException\s*\([^)]{0,240}\bstatus_code\s*=\s*40[13]\b"
+    r"\bHTTPException\s*\(\s*40[13]\b"
+    r"|\bHTTPException\s*\([^)]{0,300}\bstatus_code\s*=\s*40[13]\b"
     r"|status(?:_code)?\s*[:=]\s*40[13]\b"
     r"|\.status\s*\(\s*40[13]\s*\)"
     r"|\babort\s*\(\s*40[13]\s*\)",
     re.IGNORECASE,
 )
+_AUTH_PARTS = frozenset(
+    {
+        "auth",
+        "authenticated",
+        "authorize",
+        "authorized",
+        "user",
+        "current",
+        "session",
+        "token",
+        "jwt",
+        "login",
+        "signed",
+        "principal",
+        "identity",
+        "account",
+        "member",
+        "staff",
+        "admin",
+        "tenant",
+        "operator",
+        "role",
+        "permission",
+        "permissions",
+        "scope",
+        "scopes",
+        "api",
+        "key",
+        "apikey",
+        "verify",
+        "require",
+        "required",
+        "guard",
+        "gate",
+        "gatekeeper",
+        "protect",
+        "protected",
+        "ensure",
+        "assert",
+        "clerk",
+        "oauth",
+        "bearer",
+        "credential",
+        "credentials",
+        "pin",
+        "owner",
+    }
+)
+_AUTH_EXTRA = frozenset(
+    {
+        "authentication",
+        "authenticate",
+        "authenticated",
+        "authenticating",
+        "authorization",
+        "authorizing",
+    }
+)
+_RESOURCE_PARTS = frozenset(
+    {
+        "db",
+        "database",
+        "settings",
+        "config",
+        "redis",
+        "cache",
+        "pagination",
+        "paginate",
+        "page",
+        "limit",
+        "logger",
+        "client",
+        "http",
+    }
+)
+_SESSION_PROVIDER_PARTS = frozenset(
+    {
+        "get",
+        "async",
+        "db",
+        "database",
+        "session",
+        "factory",
+        "maker",
+        "local",
+        "scoped",
+    }
+)
+_GETTER_FILLER = frozenset({"get", "async"})
+_CREDENTIAL_PARTS = frozenset(
+    {
+        "header",
+        "headers",
+        "cookie",
+        "cookies",
+        "token",
+        "session",
+        "user",
+        "auth",
+        "authenticated",
+        "authorize",
+        "authorized",
+        "authentication",
+        "authorization",
+        "jwt",
+        "login",
+        "signed",
+        "signature",
+        "principal",
+        "identity",
+        "credential",
+        "credentials",
+        "bearer",
+        "oauth",
+        "clerk",
+        "apikey",
+        "pin",
+        "password",
+        "secret",
+    }
+)
+_CREDENTIAL_CALL = re.compile(
+    r"\b(?:verify|require|ensure|assert|guard|protect|authenticate)[A-Za-z0-9_]*\s*\(",
+    re.IGNORECASE,
+)
+_IF_HEAD = re.compile(r"\b(?:elif|else\s+if|if)\b")
+_CONDITION_CONTINUES = re.compile(r"(?:and|or|&&|\|\|)\b")
+_AUTH_WRAPPER = re.compile(r"\b(with[A-Z_][\w]*)\s*\(")
 _CONTROL_WORDS = frozenset(
     {
         "if",
@@ -196,13 +320,7 @@ _EXPRESS_ROUTE_OBJECT = re.compile(
 _APP_ASSIGN = re.compile(r"\b([A-Za-z_][\w]*)\s*=\s*(?:APIRouter|FastAPI)\s*\(")
 _INCLUDE_ROUTER = re.compile(r"\binclude_router\s*\(")
 _ROUTER_USE = re.compile(r"\b([A-Za-z_][\w]*)\s*\.\s*use\s*\(")
-_AUTHISH_CALLABLE = re.compile(
-    r"(?:current_?user|active_?user|get_(?:current_)?(?:active_)?user|"
-    r"require_?(?:user|auth)|auth_required|login_required|"
-    r"verify_?(?:token|session|jwt)|authenticate|authentication|"
-    r"\bauth\b|jwt|oauth|passport|clerk|get_?session|principal)",
-    re.IGNORECASE,
-)
+_ADD_MIDDLEWARE = re.compile(r"\b([A-Za-z_][\w]*)\s*\.\s*add_middleware\s*\(")
 _DEPENDS_NAME = re.compile(
     r"\b(?:Depends|Security)\s*\(\s*([A-Za-z_][\w.]*)",
     re.IGNORECASE,
@@ -437,13 +555,16 @@ def _is_entrypoint(unit: CodeUnit) -> bool:
 
 
 def _has_local_auth(source: str) -> bool:
-    if _LOCAL_AUTH.search(source) or _ANNOTATED_USER_DEPENDS.search(source) or _NAMED_AUTH_PARAM.search(source):
+    code = _auth_code(source)
+    if _LOCAL_AUTH.search(code) or _ANNOTATED_USER_DEPENDS.search(code) or _NAMED_AUTH_PARAM.search(code):
         return True
-    if _rejects_unauthenticated(source):
+    if _rejects_unauthenticated(code):
         return True
-    if _dependencies_are_auth(source):
+    if _has_auth_wrapper(code):
         return True
-    return _span_has_auth_dependency(source)
+    if _dependencies_are_auth(code):
+        return True
+    return _span_has_auth_dependency(code)
 
 
 def _auth_context_covers(unit: CodeUnit, auth_context: str) -> bool:
@@ -524,9 +645,11 @@ def _authenticated_objects(code: str, route_path: str | None) -> set[str]:
             found.add(name)
     for match in _ROUTER_USE.finditer(code):
         call = _balanced(code, match.end() - 1, "(", ")")
-        if not call or _AUTHISH_CALLABLE.search(call) is None:
-            continue
-        if _mount_covers(call, route_path):
+        if call and _call_has_auth_callable(call) and _mount_covers(call, route_path):
+            found.add(match.group(1))
+    for match in _ADD_MIDDLEWARE.finditer(code):
+        call = _balanced(code, match.end() - 1, "(", ")")
+        if call and _call_has_auth_callable(call):
             found.add(match.group(1))
     return found
 
@@ -560,18 +683,47 @@ def _dependency_leaf(name: str) -> str:
     return parts[-1] if parts else name
 
 
-def _dependency_is_auth(name: str) -> bool:
-    """A dependency is auth unless it only provides a DB, settings, or redis handle."""
-    return _RESOURCE_DEPENDENCY.fullmatch(_dependency_leaf(name)) is None
+def _word_parts(name: str) -> tuple[str, ...]:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", name)
+    cleaned = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", cleaned)
+    return tuple(part.lower() for part in cleaned.split() if part)
+
+
+def _part_is_auth(part: str) -> bool:
+    if part in _AUTH_PARTS or part in _AUTH_EXTRA:
+        return True
+    singular = part[:-1] if part.endswith("s") else ""
+    return singular in _AUTH_PARTS or singular in _AUTH_EXTRA
+
+
+def _is_resource_name(parts: tuple[str, ...]) -> bool:
+    if not parts:
+        return False
+    if "session" in parts and set(parts) <= _SESSION_PROVIDER_PARTS:
+        return True
+    meaningful = [part for part in parts if part not in _GETTER_FILLER and not part.isdigit()]
+    return bool(meaningful) and all(part in _RESOURCE_PARTS for part in meaningful)
+
+
+def _looks_like_auth_name(name: str) -> bool:
+    parts = _word_parts(_dependency_leaf(name))
+    if not parts or _is_resource_name(parts):
+        return False
+    return any(_part_is_auth(part) for part in parts)
 
 
 def _span_has_auth_dependency(code: str) -> bool:
+    code = _auth_code(code)
     if re.search(r"\bSecurity\s*\(", code):
         return True
-    return any(_dependency_is_auth(match.group(1)) for match in _DEPENDS_NAME.finditer(code))
+    return any(_looks_like_auth_name(match.group(1)) for match in _DEPENDS_NAME.finditer(code))
 
 
 def _dependencies_are_auth(code: str) -> bool:
+    code = _auth_code(code)
     match = re.search(r"\bdependencies\s*=\s*\[", code)
     if match is None:
         return False
@@ -581,12 +733,197 @@ def _dependencies_are_auth(code: str) -> bool:
     return _span_has_auth_dependency(inside)
 
 
+def _call_has_auth_callable(call: str) -> bool:
+    code = _auth_code(call)
+    return any(_looks_like_auth_name(name) for name in re.findall(r"[A-Za-z_][\w]*", code))
+
+
+def _has_auth_wrapper(code: str) -> bool:
+    source = _auth_code(code)
+    return any(_looks_like_auth_name(match.group(1)) for match in _AUTH_WRAPPER.finditer(source))
+
+
 def _rejects_unauthenticated(source: str) -> bool:
-    code = _strip_comments(_code_outside_literals(source))
-    return _UNAUTH_REJECTION.search(code) is not None
+    return _credential_branch_rejects(_auth_code(source))
+
+
+def _credential_branch_rejects(code: str) -> bool:
+    for match in _IF_HEAD.finditer(code):
+        parsed = _split_conditional(code, match.end())
+        if parsed is None:
+            continue
+        condition, body = parsed
+        if _condition_checks_credential(condition) and _UNAUTH_REJECTION.search(body):
+            return True
+    return False
+
+
+def _condition_checks_credential(condition: str) -> bool:
+    if _CREDENTIAL_CALL.search(condition):
+        return True
+    for name in re.findall(r"[A-Za-z_][\w]*", condition):
+        parts = set(_word_parts(name))
+        if parts & _CREDENTIAL_PARTS:
+            return True
+        if "api" in parts and "key" in parts:
+            return True
+    return False
+
+
+def _split_conditional(code: str, index: int) -> tuple[str, str] | None:
+    start = _skip_ws(code, index)
+    if start >= len(code):
+        return None
+    kind, cond_end, body_at = _scan_condition(code, start)
+    if kind is None or cond_end is None or body_at is None:
+        return None
+    condition = _unwrap_condition(code[start:cond_end])
+    if kind == "python":
+        body, _end = _python_suite(code, body_at)
+        return condition, body
+    if kind == "brace":
+        body, end = _brace_body(code, body_at)
+        if body is None:
+            return None
+        extra, _else_end = _else_clause(code, end)
+        return condition, body + extra
+    statement, _end = _statement_at(code, body_at)
+    return condition, statement
+
+
+def _scan_condition(code: str, start: int) -> tuple[str | None, int | None, int | None]:
+    depth = 0
+    cursor = start
+    length = len(code)
+    opened_paren = code[start] == "("
+    while cursor < length:
+        char = code[cursor]
+        if char == "{" and depth == 0:
+            return "brace", cursor, cursor
+        if char in "([{":
+            depth += 1
+            cursor += 1
+            continue
+        if char in ")]}":
+            if depth == 0:
+                return None, None, None
+            depth -= 1
+            cursor += 1
+            if depth == 0 and opened_paren and char == ")":
+                nxt = _skip_ws(code, cursor)
+                if nxt < length and code[nxt] == ":":
+                    return "python", cursor, nxt + 1
+                if nxt < length and code[nxt] == "{":
+                    return "brace", cursor, nxt
+                if nxt < length and _CONDITION_CONTINUES.match(code[nxt:]):
+                    continue
+                if nxt < length:
+                    return "statement", cursor, nxt
+                return None, None, None
+            continue
+        if depth == 0 and char == ":":
+            return "python", cursor, cursor + 1
+        if depth == 0 and char == "\n":
+            return None, None, None
+        cursor += 1
+    return None, None, None
+
+
+def _unwrap_condition(condition: str) -> str:
+    text = condition.strip()
+    if len(text) >= 2 and text[0] == "(" and text[-1] == ")" and _balanced(text, 0, "(", ")") == text:
+        return text[1:-1].strip()
+    return text
+
+
+def _python_suite(code: str, after_colon: int) -> tuple[str, int]:
+    newline = code.find("\n", after_colon)
+    if newline < 0:
+        return code[after_colon:], len(code)
+    base = _indent_at(code, after_colon)
+    chunks = [code[after_colon:newline]]
+    cursor = newline + 1
+    while cursor < len(code):
+        next_nl = code.find("\n", cursor)
+        if next_nl < 0:
+            next_nl = len(code)
+        line = code[cursor:next_nl]
+        if line.strip() and _leading_indent(line) <= base:
+            break
+        chunks.append(line)
+        if next_nl >= len(code):
+            cursor = len(code)
+            break
+        cursor = next_nl + 1
+    body = "\n".join(chunks)
+    extra, end = _else_clause(code, cursor)
+    if extra:
+        return body + "\n" + extra, end
+    return body, cursor
+
+
+def _else_clause(code: str, index: int) -> tuple[str, int]:
+    cursor = _skip_ws(code, index)
+    if not re.match(r"else\b", code[cursor:]):
+        return "", index
+    if re.match(r"else\s+if\b", code[cursor:]):
+        return "", index
+    after_kw = cursor + len("else")
+    after_kw = _skip_ws(code, after_kw)
+    if after_kw < len(code) and code[after_kw] == ":":
+        return _python_suite(code, after_kw + 1)
+    if after_kw < len(code) and code[after_kw] == "{":
+        body, end = _brace_body(code, after_kw)
+        return body or "", end
+    return _statement_at(code, after_kw)
+
+
+def _brace_body(code: str, open_index: int) -> tuple[str | None, int]:
+    span = _balanced(code, open_index, "{", "}")
+    if span is None:
+        return None, open_index
+    return span[1:-1], open_index + len(span)
+
+
+def _statement_at(code: str, index: int) -> tuple[str, int]:
+    cursor = _skip_ws(code, index)
+    if cursor >= len(code):
+        return "", cursor
+    if code[cursor] == "{":
+        body, end = _brace_body(code, cursor)
+        return body or "", end
+    end = cursor
+    while end < len(code) and code[end] not in ";\n":
+        end += 1
+    if end < len(code) and code[end] == ";":
+        end += 1
+    return code[cursor:end], end
+
+
+def _skip_ws(code: str, index: int) -> int:
+    while index < len(code) and code[index] in " \t\r\n":
+        index += 1
+    return index
+
+
+def _indent_at(code: str, pos: int) -> int:
+    line_start = code.rfind("\n", 0, pos) + 1
+    return _leading_indent(code[line_start:pos])
+
+
+def _leading_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _auth_code(text: str) -> str:
+    return _strip_comments(_code_outside_literals(text))
 
 
 def _strip_comments(text: str) -> str:
+    def blanks(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    text = re.sub(r"/\*.*?\*/", blanks, text, flags=re.DOTALL)
     return re.sub(r"(?m)#.*$|//.*$", "", text)
 
 

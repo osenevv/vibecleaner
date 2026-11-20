@@ -13,7 +13,9 @@ _KNOWN_SECRETS = (
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
 )
 _SENSITIVE_KEY = re.compile(
-    r"(secret|token|api_?key|apikey|password|passwd|private_?key|access_?key|client_?secret)",
+    r"(?:^|_)(?:secret|token|password|passwd|pwd|apikey|api_key|private_key|access_key|"
+    r"client_secret|auth_token|credential|credentials|dsn|database_url|service_role|"
+    r"signing_key|webhook_secret)(?:_|$)",
     re.IGNORECASE,
 )
 _ASSIGNED = re.compile(
@@ -47,9 +49,20 @@ def _external_mask() -> Callable[[str], str] | None:
     return None
 
 
+def _key_sensitive(key: str) -> bool:
+    try:
+        from vibeguard import deterministic
+    except ImportError:
+        return _SENSITIVE_KEY.search(key) is not None
+    checker = getattr(deterministic, "_key_is_sensitive", None)
+    if not callable(checker):
+        return _SENSITIVE_KEY.search(key) is not None
+    return bool(checker(key))
+
+
 def _replace_assignment(match: re.Match[str]) -> str:
     key = match.group("key")
-    if _SENSITIVE_KEY.search(key) is None:
+    if not _key_sensitive(key):
         return match.group(0)
     value = match.group("quoted") or match.group("bare") or ""
     if value.startswith("<redacted:"):

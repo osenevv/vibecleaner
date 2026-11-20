@@ -59,9 +59,46 @@ _PUBLIC_BAD = (
 
 _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
 _NEXT_PUBLIC = re.compile(r"\bNEXT_PUBLIC_[A-Z0-9_]+\b")
-_SENSITIVE_NAME = re.compile(
-    r"(secret|token|api_?key|apikey|password|passwd|private_?key|access_?key|client_?secret|auth)",
-    re.IGNORECASE,
+_SECRET_PARTS = frozenset(
+    {
+        "secret",
+        "token",
+        "password",
+        "passwd",
+        "pwd",
+        "apikey",
+        "credential",
+        "credentials",
+        "dsn",
+    }
+)
+_SECRET_COMPOUNDS = (
+    ("api", "key"),
+    ("private", "key"),
+    ("access", "key"),
+    ("client", "secret"),
+    ("auth", "token"),
+    ("database", "url"),
+    ("service", "role"),
+    ("signing", "key"),
+    ("webhook", "secret"),
+)
+_TOKEN_METRIC_PARTS = frozenset(
+    {
+        "count",
+        "counts",
+        "counter",
+        "max",
+        "min",
+        "limit",
+        "size",
+        "total",
+        "num",
+        "number",
+        "index",
+        "offset",
+        "length",
+    }
 )
 _UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _QUOTED_ASSIGN = re.compile(
@@ -462,7 +499,7 @@ def _entropy_hits(f: SourceFile) -> list[tuple[int, str, str]]:
 def _accept_entropy(value: str, key: str) -> bool:
     if not 20 <= len(value) <= 200 or any(char.isspace() for char in value):
         return False
-    if shannon_entropy(value) <= 4.3 or _SENSITIVE_NAME.search(key) is None:
+    if shannon_entropy(value) <= 4.3 or not _key_is_sensitive(key):
         return False
     lowered = value.lower()
     if any(word in lowered for word in _PLACEHOLDER_WORDS) or "<" in value or "${" in value:
@@ -1497,9 +1534,8 @@ def _mask_assignments(line: str, secrets: list[str], *, redact_env: bool) -> str
         literal = _literal_token(match.group("raw").strip())
         if literal is not None:
             inner, quote = literal
-            tight = match.group("eq") == "="
-            if inner and not inner.startswith("<redacted:") and (
-                redact_env or tight or _assignment_is_secret(match.group("key"), inner, secrets)
+            if inner and not inner.startswith("<redacted:") and _should_redact_assignment(
+                match.group("key"), inner, secrets, redact_env=redact_env
             ):
                 shown = _redact(inner)
                 if quote:
@@ -1512,7 +1548,7 @@ def _mask_assignments(line: str, secrets: list[str], *, redact_env: bool) -> str
         if not inner or inner.startswith("<redacted:"):
             return found.group(0)
         key = re.split(r"\s*[:=]", found.group("head"), maxsplit=1)[0].strip("'\"")
-        if not _assignment_is_secret(key, inner, secrets):
+        if not _should_redact_assignment(key, inner, secrets, redact_env=redact_env):
             return found.group(0)
         shown = _redact(inner)
         if quote:
@@ -1538,12 +1574,52 @@ def _unwrap_literal(raw: str) -> tuple[str, str]:
     return raw, ""
 
 
-def _assignment_is_secret(key: str, value: str, secrets: list[str]) -> bool:
+def _should_redact_assignment(key: str, value: str, secrets: list[str], *, redact_env: bool) -> bool:
+    if redact_env:
+        return _env_value_should_redact(key, value, secrets)
+    return _assignment_is_secret(key, value, secrets)
+
+
+def _env_value_should_redact(key: str, value: str, secrets: list[str]) -> bool:
+    if _value_has_known_secret(value, secrets):
+        return True
+    if _key_is_sensitive(key):
+        return True
+    return len(value) >= 16 and shannon_entropy(value) > 3.5
+
+
+def _value_has_known_secret(value: str, secrets: list[str]) -> bool:
     if any(item and item in value for item in secrets):
         return True
-    if any(pattern.search(value) for _kind, pattern in _KNOWN_PATTERNS):
+    return any(pattern.search(value) for _kind, pattern in _KNOWN_PATTERNS)
+
+
+def _name_parts(name: str) -> tuple[str, ...]:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", name)
+    cleaned = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", cleaned)
+    return tuple(part.lower() for part in cleaned.split() if part)
+
+
+def _key_is_sensitive(key: str) -> bool:
+    parts = _name_parts(key)
+    if any(part in _TOKEN_METRIC_PARTS for part in parts):
+        parts = tuple(part for part in parts if part != "token")
+    if any(part in _SECRET_PARTS for part in parts):
         return True
-    if _SENSITIVE_NAME.search(key) is None or len(value) < 4:
+    width = 2
+    for index in range(len(parts) - width + 1):
+        if parts[index : index + width] in _SECRET_COMPOUNDS:
+            return True
+    return False
+
+
+def _assignment_is_secret(key: str, value: str, secrets: list[str]) -> bool:
+    if _value_has_known_secret(value, secrets):
+        return True
+    if not _key_is_sensitive(key) or len(value) < 4:
         return False
     if any(word in value.lower() for word in _PLACEHOLDER_WORDS):
         return False

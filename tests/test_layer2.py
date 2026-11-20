@@ -1837,3 +1837,130 @@ def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
     blocked = json.loads(critical.stdout)
     assert blocked["decision"] == "continue"
     assert "CRITICAL" in blocked["reason"]
+
+
+def _auth_score(source: str, auth: str = "", **overrides: object) -> float:
+    backend = OfflineHeuristicBackend()
+    return _offline_scores(backend, _unit(source, **overrides), auth)["D3.missing_auth"]
+
+
+def test_dependency_auth_uses_word_parts_and_ignores_comments() -> None:
+    def handler(dep: str) -> str:
+        return f'''
+@app.post("/items")
+def create(body: Item, db=Depends({dep})):
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+
+    assert _auth_score(handler("pagination")) >= 0.9
+    assert _auth_score(handler("get_db")) >= 0.9
+    assert _auth_score(handler("get_session")) >= 0.9
+    assert _auth_score(handler("ensure_staff")) < 0.2
+    assert _auth_score(handler("verify_pin_session")) < 0.2
+    assert _auth_score(handler("get_current_session_user")) < 0.2
+    secured = '''
+@app.post("/items")
+def create(body: Item, cred=Security(oauth2_scheme)):
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(secured) < 0.2
+    security_resource = '''
+@app.post("/items")
+def create(body: Item, cred=Security(pagination)):
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(security_resource) < 0.2
+
+    commented = '''
+@app.post("/items")
+def create(body: Item):
+    # see Depends(require_user)
+    note = "Depends(require_user)"
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(commented) >= 0.9
+    js_comment = """
+router.post("/orders", async (req, res) => {
+  // Depends(require_user)
+  await db.insert({ sku: req.body.sku })
+})
+"""
+    assert _auth_score(js_comment, file="server.js", language=Language.JAVASCRIPT, route_path="/orders") >= 0.9
+
+    open_insert = '''
+@app.post("/items")
+def create(body: Item):
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert (
+        _auth_score(open_insert, "app.py:3: FastAPI(dependencies=[Depends(pagination)])") >= 0.9
+    )
+    assert (
+        _auth_score(open_insert, "app.py:3: FastAPI(dependencies=[Depends(get_db)])") >= 0.9
+    )
+    assert (
+        _auth_score(open_insert, "app.py:3: FastAPI(dependencies=[Depends(ensure_staff)])") < 0.2
+    )
+
+    express = '''
+router.post("/orders", async (req, res) => {
+  await db.insert({ sku: req.body.sku })
+})
+'''
+    express_kwargs = {"file": "server.js", "language": Language.JAVASCRIPT, "route_path": "/orders"}
+    assert _auth_score(express, "server.js:4: router.use(ensureStaff)", **express_kwargs) < 0.2
+    assert _auth_score(express, "server.js:4: router.use(pagination)", **express_kwargs) >= 0.9
+    wrapped = '''
+router.post("/orders", async (req, res) => {
+  await withMember()
+  await db.insert({ sku: req.body.sku })
+})
+'''
+    assert _auth_score(wrapped, **express_kwargs) < 0.2
+    timed = '''
+router.post("/orders", async (req, res) => {
+  await withTimeout()
+  await db.insert({ sku: req.body.sku })
+})
+'''
+    assert _auth_score(timed, **express_kwargs) >= 0.9
+
+
+def test_unauth_rejection_requires_a_credential_condition() -> None:
+    bare = '''
+@app.post("/items")
+def create(body: Item):
+    raise HTTPException(status_code=401, detail="unknown sku")
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(bare) >= 0.9
+    metrics = '''
+@app.post("/items")
+def create(body: Item):
+    metrics.record(status_code=401)
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(metrics) >= 0.9
+    signed = '''
+@app.post("/items")
+def create(request: Request, body: Item):
+    if not request.headers.get("x-signature"):
+        raise HTTPException(401)
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(signed) < 0.2
+    one_line = '''
+@app.post("/items")
+def create(request: Request, body: Item):
+    if not request.headers.get('x-signature'): raise HTTPException(401)
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(one_line) < 0.2
+    unrelated = '''
+@app.post("/items")
+def create(body: Item):
+    if not body.sku:
+        raise HTTPException(status_code=401, detail="unknown sku")
+    db.execute("INSERT INTO items (sku) VALUES (%s)", (body.sku,))
+'''
+    assert _auth_score(unrelated) >= 0.9
