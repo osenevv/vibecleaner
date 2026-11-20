@@ -242,6 +242,7 @@ class Finding:
     probability: float | None = None  # Layer 2 calibrated noul; None for Layer 1 (exact)
     snippet: str | None = None
     fix_patch: str | None = None  # unified diff from patcher (--fix)
+    module_risk: float | None = None  # Layer 2 `severity` score question: expected level 0 (clean) .. 2 (critical)
 
     @property
     def spec(self) -> RuleSpec:
