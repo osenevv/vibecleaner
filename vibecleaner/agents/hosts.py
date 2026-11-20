@@ -40,9 +40,13 @@ def execute_argv(
     if not argv or (argv[0] not in allowed_bins and not Path(argv[0]).expanduser().is_file() and shutil.which(argv[0]) is None):
         raise ProviderError(f"agent command not found: {argv[0] if argv else ''}")
     started = time.monotonic()
+    run_argv = list(argv)
+    resolved = shutil.which(argv[0])
+    if resolved:
+        run_argv[0] = resolved
     try:
         proc = subprocess.run(
-            argv,
+            run_argv,
             cwd=cwd,
             capture_output=capture,
             text=True,

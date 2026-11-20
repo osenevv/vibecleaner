@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -191,7 +192,7 @@ def resolve_agent_command(agent: str | None = None) -> tuple[str, list[str]] | N
         if cleaned in preset_map:
             cmd = list(preset_map[cleaned])
             return (cleaned, cmd) if shutil.which(cmd[0]) else None
-        parts = shlex.split(cleaned)
+        parts = shlex.split(cleaned, posix=(os.name != "nt"))
         if not parts:
             return None
         exe = parts[0]

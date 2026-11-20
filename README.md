@@ -18,7 +18,7 @@ vibecleaner --autofix   # hands the Fix Prompt to claude/codex/gemini/agy (or cl
 
 (`vibecleaner` is also installed as an alias for all commands.)
 
-Requires Python 3.10+. Export `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) to enable live `gemini-decision-1` checks. Without a key, `--mode auto` uses the offline heuristic judge at $0.
+Requires Python 3.11+. Export `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) to enable live `gemini-decision-1` checks. Without a key, `--mode auto` uses the offline heuristic judge at $0.
 
 ## How it works
 

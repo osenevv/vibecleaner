@@ -12,6 +12,14 @@
 
 set -euo pipefail
 
+py() {
+  if command -v python3 >/dev/null 2>&1; then
+    command python3 "$@"
+  else
+    command python "$@"
+  fi
+}
+
 event="${1:-stop}"
 case "$event" in
   stop | post-tool) ;;
@@ -28,7 +36,7 @@ trap 'rm -f "$payload_file" "$err_file"' EXIT
 cat >"$payload_file" || true
 
 workspace="$(
-  python3 - "$payload_file" <<'PY' || true
+  py - "$payload_file" <<'PY' || true
 import json
 import sys
 from pathlib import Path
@@ -89,7 +97,7 @@ fi
 cd "$workspace"
 
 emit_block() {
-  if ! REASON="$1" python3 -c 'import json, os, sys
+  if ! REASON="$1" py -c 'import json, os, sys
 text = os.environ.get("REASON", "")
 if len(text) > 8000:
     text = text[:8000] + "\n…[truncated]"

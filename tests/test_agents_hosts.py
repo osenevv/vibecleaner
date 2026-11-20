@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 import pytest
 
+from pathcmd import install_path_command
 from vibecleaner.agents.hosts import host_from_name, preset_argv
 from vibecleaner.agents.team import describe_team, select_team
 from vibecleaner.fix_contract import ProviderError
@@ -21,14 +21,14 @@ _HOSTS = (
 
 
 def _install_cli(bin_dir: Path, name: str, record: Path) -> None:
-    script = bin_dir / name
-    script.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' \"$0\" \"$@\" > {str(record)!r}\n"
-        "printf 'patched\\n' > edited.txt\n",
-        encoding="utf-8",
+    install_path_command(
+        bin_dir,
+        name,
+        "import pathlib, sys\n"
+        f"pathlib.Path({str(record)!r}).write_text("
+        f"'\\n'.join([{name!r}, *sys.argv[1:]]) + '\\n', encoding='utf-8')\n"
+        "pathlib.Path('edited.txt').write_text('patched\\n', encoding='utf-8')\n",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
 
 
 def test_hosts_run_in_the_worktree_with_verified_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,9 +72,7 @@ def test_host_timeout_and_missing_binary(tmp_path: Path, monkeypatch: pytest.Mon
     bin_dir.mkdir()
     work = tmp_path / "work"
     work.mkdir()
-    stuck = bin_dir / "claude"
-    stuck.write_text("#!/bin/sh\nkill -STOP $$\n", encoding="utf-8")
-    stuck.chmod(stuck.stat().st_mode | stat.S_IXUSR)
+    install_path_command(bin_dir, "claude", "while True:\n    pass\n")
     monkeypatch.setenv("PATH", str(bin_dir))
     result = host_from_name("claude-code").run_task(work, "wait", timeout_s=0.4)
     assert result.timed_out
@@ -89,9 +87,7 @@ def test_host_timeout_and_missing_binary(tmp_path: Path, monkeypatch: pytest.Mon
 def test_host_is_taken_from_env_not_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    claude = bin_dir / "claude"
-    claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    claude.chmod(claude.stat().st_mode | stat.S_IXUSR)
+    install_path_command(bin_dir, "claude", "raise SystemExit(0)\n")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.delenv("VIBECLEANER_HOST", raising=False)
     assert select_team(tmp_path, local=False, env={}).host is None

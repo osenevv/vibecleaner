@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from gitutil import init_git
+from pathcmd import find_bash
 from rich.console import Console
 
 from vibecleaner.cache import (
@@ -1905,7 +1906,7 @@ def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
     payload = json.dumps({"workspacePaths": [str(repo)]})
 
     medium = subprocess.run(
-        ["bash", str(hook), "stop"],
+        [find_bash(), str(hook), "stop"],
         input=payload,
         text=True,
         capture_output=True,
@@ -1919,7 +1920,7 @@ def test_antigravity_hook_blocks_only_on_critical(tmp_path: Path) -> None:
     token = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0"
     (repo / "keys.py").write_text("TOKEN = " + repr(token) + "\n", encoding="utf-8")
     critical = subprocess.run(
-        ["bash", str(hook), "stop"],
+        [find_bash(), str(hook), "stop"],
         input=payload,
         text=True,
         capture_output=True,
@@ -1985,7 +1986,7 @@ def test_antigravity_hook_fails_closed_on_exit_2_broken_rules(tmp_path: Path) ->
     payload = json.dumps({"workspacePaths": [str(repo)]})
 
     stop_run = subprocess.run(
-        ["bash", str(hook), "stop"],
+        [find_bash(), str(hook), "stop"],
         input=payload,
         text=True,
         capture_output=True,
@@ -1998,7 +1999,7 @@ def test_antigravity_hook_fails_closed_on_exit_2_broken_rules(tmp_path: Path) ->
     assert "exit 2" in stop_data["reason"]
 
     post_run = subprocess.run(
-        ["bash", str(hook), "post-tool"],
+        [find_bash(), str(hook), "post-tool"],
         input=payload,
         text=True,
         capture_output=True,
@@ -2029,7 +2030,7 @@ def test_antigravity_hook_fails_closed_when_vibecleaner_missing(tmp_path: Path) 
     payload = json.dumps({"workspacePaths": [str(repo)]})
 
     stop_run = subprocess.run(
-        ["bash", str(hook), "stop"],
+        [find_bash(), str(hook), "stop"],
         input=payload,
         text=True,
         capture_output=True,
@@ -2042,7 +2043,7 @@ def test_antigravity_hook_fails_closed_when_vibecleaner_missing(tmp_path: Path) 
     assert "not on PATH" in stop_data["reason"]
 
     post_run = subprocess.run(
-        ["bash", str(hook), "post-tool"],
+        [find_bash(), str(hook), "post-tool"],
         input=payload,
         text=True,
         capture_output=True,

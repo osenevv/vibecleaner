@@ -5,12 +5,12 @@ from __future__ import annotations
 import errno
 import json
 import os
-import stat
 from pathlib import Path
 
 import pytest
 
 from gitutil import hook_file, init_git
+from pathcmd import assert_user_executable
 from vibecleaner.cli import main
 
 
@@ -41,8 +41,7 @@ def test_init_creates_gitignore_and_pre_push_hook_idempotently(
         assert entry in gitignore
 
     hook = hook_file(tmp_path)
-    assert hook.is_file()
-    assert bool(hook.stat().st_mode & stat.S_IXUSR)
+    assert_user_executable(hook)
     assert "vibecleaner scan . --mode off" in hook.read_text(encoding="utf-8")
 
     # Second run is idempotent: no duplicate lines, statuses are up_to_date.
@@ -102,8 +101,7 @@ def test_init_autodetects_editor_configs_and_ci_flag(
     assert ".git/hooks/pre-push" not in actions
 
     hook_script = tmp_path / ".agents" / "plugins" / "vibecleaner" / "scripts" / "vibecleaner-hook.sh"
-    assert hook_script.is_file()
-    assert bool(hook_script.stat().st_mode & stat.S_IXUSR)
+    assert_user_executable(hook_script)
 
 
 def test_init_fails_closed_on_missing_directory(

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_http import Bench, base_url, serve  # noqa: E402
 
 from gitutil import init_git
+from pathcmd import assert_user_executable, find_bash
 from vibecleaner.init_cmd import run_init
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -30,26 +31,37 @@ def _git_with_main(repo: Path) -> None:
 
 
 def _tool_bin(bin_dir: Path) -> None:
-    for name in ("git", "python3", "mktemp", "rm", "cat", "tr", "dirname"):
+    python = shutil.which("python3") or shutil.which("python")
+    assert python is not None
+    for name in ("git", "mktemp", "rm", "cat", "tr", "dirname"):
         source = shutil.which(name)
         assert source is not None
         link = bin_dir / name
         if not link.exists():
             link.symlink_to(source)
+    for name in ("python3", "python"):
+        link = bin_dir / name
+        if not link.exists():
+            link.symlink_to(python)
 
 
 def _fake_vibecleaner(bin_dir: Path, record: Path, *, code: int, stdout: str = "", stderr: str = "") -> None:
     script = bin_dir / "vibecleaner"
     script.write_text(
-        f"#!{sys.executable}\n"
+        f"#!{find_bash()}\n"
+        "if command -v python3 >/dev/null 2>&1; then py=python3; else py=python; fi\n"
+        f'exec "$py" - {code} {stdout!r} {stderr!r} {str(record)!r} "$@" <<\'PY\'\n'
         "import json, pathlib, sys\n"
-        f"pathlib.Path({str(record)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n"
-        f"sys.stdout.write({stdout!r})\n"
-        f"sys.stderr.write({stderr!r})\n"
-        f"raise SystemExit({code})\n",
+        "code, out, err, record, *args = sys.argv[1:]\n"
+        "pathlib.Path(record).write_text(json.dumps(args), encoding='utf-8')\n"
+        "sys.stdout.write(out)\n"
+        "sys.stderr.write(err)\n"
+        "raise SystemExit(int(code))\n"
+        "PY\n",
         encoding="utf-8",
+        newline="\n",
     )
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _run_hook(repo: Path, bin_dir: Path, event: str, payload: str = "{}") -> subprocess.CompletedProcess[str]:
@@ -57,8 +69,7 @@ def _run_hook(repo: Path, bin_dir: Path, event: str, payload: str = "{}") -> sub
     env["PATH"] = str(bin_dir)
     env["VIBECLEANER_BASE"] = "main"
     env["VIBECLEANER_FAIL_ON"] = "critical"
-    bash = shutil.which("bash")
-    assert bash is not None
+    bash = find_bash()
     return subprocess.run(
         [bash, str(_HOOK), event],
         cwd=repo,
@@ -168,7 +179,7 @@ def _plugin_installed(action, root: Path, needle: str) -> bool:
         assert needle in skill.read_text(encoding="utf-8")
         hook = root / action.target / "hooks" / "vibecleaner-hook.sh"
         if hook.is_file():
-            assert hook.stat().st_mode & stat.S_IXUSR
+            assert_user_executable(hook)
         return True
     assert action.status == "skipped"
     assert "not permitted" in action.detail

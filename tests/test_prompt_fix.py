@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import stat
 import sys
 from pathlib import Path
 
 import pytest
 
+from pathcmd import install_path_command
 from vibecleaner.cli import main
 
 
@@ -132,14 +132,12 @@ def test_autofix_falls_back_to_clipboard_when_no_agent_cli_on_path(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     captured_clip = tmp_path / "clipboard.txt"
-    pbcopy = fake_bin / "pbcopy"
-    pbcopy.write_text(
-        f"#!{sys.executable}\n"
+    install_path_command(
+        fake_bin,
+        "pbcopy",
         "import pathlib, sys\n"
         f"pathlib.Path({str(captured_clip)!r}).write_text(sys.stdin.read(), encoding='utf-8')\n",
-        encoding="utf-8",
     )
-    pbcopy.chmod(pbcopy.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", str(fake_bin))
 
     rc = main([str(repo), "--autofix", "--mode", "offline", "--no-report", "--no-cache"])
