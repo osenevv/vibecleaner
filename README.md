@@ -63,6 +63,7 @@ Add `.vibeguard_cache.json` and `VIBEGUARD_REPORT.md` to your `.gitignore`. Put 
 | D1 | 1 | Committed `.env*` files, `NEXT_PUBLIC_*` variables holding private keys (service role, OpenAI, Stripe secret), known key formats, high-entropy literals (Shannon > 4.3) bound to secret-like names. Values are always redacted in output. |
 | D2 | 1 | `CREATE TABLE` in Supabase migrations without `ENABLE ROW LEVEL SECURITY` or without `CREATE POLICY` (checked across all migrations); `allow_origins=["*"]` / `origin: '*'` combined with credentials. |
 | D6a | 1 | `except Exception: pass`, bare `except:`, empty `catch {}`; god files (> 500 LOC mixing SQL, HTTP and business logic); deprecated SDK calls (`openai.ChatCompletion.create`, Pydantic v1 `@validator` / `.dict()`, `new OpenAIApi`); `*args, **kwargs` pass-through wrappers. |
+| D6c | 1 | LLM prose tics in `.md`, `.mdx`, `.rst`, and `.html` docs. A high-precision slice of the [declauding](https://github.com/oaustegard/claude-skills/releases/tag/declauding-v0.13.0) register: chatbot residue, knowledge-cutoff disclaimers, stock vocabulary, copula avoidance, staged reveals, and docs that describe the change instead of the behavior. Low severity. Changelogs are skipped, and so are the declauding shapes that ordinary technical writing uses (bold-label lists, contrasts, short paragraphs, absolute negatives). |
 | D3 | 2 | An unauthenticated caller can trigger a write or paid API call, considering middleware matchers and router-level dependencies. |
 | D4 | 2 | Handler trusts `user_id`, `org_id`, `role`, `is_admin`, `price` or `amount` from the client. |
 | D5 | 2 | User text in LLM system instructions, or untrusted input reaching shell, SQL, file-write or webhook tools without validation. |
@@ -197,3 +198,4 @@ The plan's multi-agent build protocol was followed. Claude Opus 5.5 orchestrated
 - Auth defined in another file and applied by path prefix is resolved only through the global auth context, not full import resolution.
 - `--fix` uses a generative Gemini model (`VIBEGUARD_FIX_MODEL`, default `gemini-2.5-flash`). It drafts diffs for review and never applies them.
 - Live `gemini-decision-1` accuracy has not been measured in this repo yet (no API key during the build).
+- D6c reports lexical prose candidates only. Declauding's rewrite, embedding ranker, structural review of headers and closers, and newcomer-read hook are not part of the scan.

@@ -99,6 +99,10 @@ RULES: dict[str, RuleSpec] = {
             "Call the wrapped function directly or give the wrapper a real responsibility.",
         ),
         RuleSpec(
+            "D6c.llm_prose", "D6c", "LLM prose tic", Category.SLOP, Severity.LOW, 1,
+            "State the fact in plain technical prose. A hit is a candidate: quoted specimens and the author's own voice are not tics.",
+        ),
+        RuleSpec(
             "D3.missing_auth", "D3", "Missing authentication on mutating route", Category.SECURITY, Severity.CRITICAL, 2,
             "Require an authenticated session (route dependency, middleware matcher, or explicit session check) before the mutation.",
             question=(

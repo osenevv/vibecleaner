@@ -22,6 +22,7 @@ from vibeguard.deterministic import (
     detect_deprecated_sdk,
     detect_god_file,
     detect_passthrough_wrappers,
+    detect_prose_tics,
     detect_secrets,
     detect_silent_exceptions,
     detect_supabase_rls,
@@ -1259,3 +1260,39 @@ def test_redaction_keeps_neutral_keys_and_hides_env_secrets() -> None:
     debug = detect_secrets(_sf(".env", "DEBUG=false\n"))
     assert debug[0].snippet is not None
     assert "DEBUG=false" in debug[0].snippet
+
+
+def test_prose_tics_flag_model_residue_and_skip_technical_writing() -> None:
+    drafted = "\n".join(
+        [
+            "# Checkout",
+            "",
+            "I hope this helps! Let me know if you'd like me to expand on refunds.",
+            "As of my last training, the route delves into the tapestry of payments.",
+            "The handler serves as a gateway and it's worth noting that it can potentially fail.",
+            "Let's be honest: this was added to replace the previous approach.",
+            "One factual note, not fixed: the webhook has no signature check.",
+        ]
+    )
+    hits = detect_prose_tics(_sf("docs/checkout.md", drafted))
+    assert {finding.line for finding in hits} == {3, 4, 5, 6, 7}
+    assert all(finding.rule_id == "D6c.llm_prose" for finding in hits)
+    assert all(finding.severity.value == "low" for finding in hits)
+    assert "chatbot" in hits[0].message
+
+    technical = "\n".join(
+        [
+            "## GitHub Action",
+            "",
+            "Scan the diff, not the whole tree.",
+            "",
+            "- **Layer 1:** tree-sitter, not a model.",
+            "- **Cache:** unchanged functions cost nothing.",
+            "",
+            "The gate fails closed. It does not trust a missing path.",
+            "Use `delve` only as an example inside code.",
+        ]
+    )
+    assert detect_prose_tics(_sf("README.md", technical)) == []
+    assert detect_prose_tics(_sf("api/orders.py", "def f():\n    # I hope this helps\n    return 1\n")) == []
+    assert detect_prose_tics(_sf("CHANGELOG.md", "I hope this helps!\n")) == []
