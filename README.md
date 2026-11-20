@@ -169,6 +169,7 @@ pip install -e ".[dev]"
 pytest -q                                   # 69 tests, < 1 s, no network
 python benchmarks/run_eval.py --mode offline
 vibeguard scan . --mode offline             # VibeGuard passes its own gate
+scripts/demo.sh                             # ~40 s terminal demo on a throwaway vibe-coded app
 ```
 
 | Module | Responsibility |
