@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Required. VibeGuard diffs against origin/<base branch>.
           # The composite action also runs: git fetch --no-tags origin <base ref>
