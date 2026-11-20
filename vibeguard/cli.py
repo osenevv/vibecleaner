@@ -17,6 +17,7 @@ from vibeguard.decision_judge import DecisionAPIError
 from vibeguard.models import DEFAULT_THRESHOLD, Finding
 from vibeguard.pipeline import run_scan
 from vibeguard.reporter import render_terminal, to_json, write_markdown, write_sarif
+from vibeguard.states import detect_state_bugs, extract_machines, render_states
 
 _FAIL_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
@@ -50,6 +51,8 @@ def _main(argv: list[str]) -> int:
     if args.command == "version":
         print(__version__)
         return 0
+    if args.command == "states":
+        return _states(args)
     if not math.isfinite(args.threshold) or not 0.01 <= args.threshold <= 0.99:
         print(
             "error: --threshold must be between 0.01 and 0.99 "
@@ -121,8 +124,40 @@ def _build_parser() -> _Parser:
         help="exit 1 when a finding is at or above this severity (default: high)",
     )
     scan.add_argument("--no-cache", action="store_true")
+    states = sub.add_parser("states", help="write state machines and confirmed invalid transitions")
+    states.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
+    states.add_argument("--out", default=None, metavar="PATH", help="markdown path (default: <root>/VIBEGUARD_STATES.md)")
+    states.add_argument(
+        "--fail-on",
+        choices=("critical", "high", "medium", "low", "none"),
+        default="high",
+        help="exit 1 when a confirmed transition is at or above this severity",
+    )
     sub.add_parser("version", help="print the version")
     return parser
+
+
+def _states(args: argparse.Namespace) -> int:
+    from vibeguard.collector import collect
+
+    root = Path(args.path).expanduser().resolve()
+    try:
+        ctx = collect(root)
+    except CollectorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    machines = extract_machines(ctx.files)
+    findings = [finding for source in ctx.files for finding in detect_state_bugs(source)]
+    destination = Path(args.out) if args.out else root / "VIBEGUARD_STATES.md"
+    try:
+        destination.write_text(render_states(machines, findings), encoding="utf-8")
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"wrote {destination} ({len(machines)} machine(s), {len(findings)} invalid transition(s))")
+    if _should_fail(findings, args.fail_on):
+        return 1
+    return 0
 
 
 def _should_fail(findings: list[Finding], fail_on: str) -> bool:

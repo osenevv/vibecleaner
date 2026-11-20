@@ -26,8 +26,15 @@ Run this from the repository root.
    ```
 
 2. Read `VIBEGUARD_REPORT.md` in the repository root. It lists each finding with severity, file, and line.
-3. Fix findings by severity: critical, then high, then medium, then low. Change the code so the pattern is gone. Do not suppress a rule, skip a file, or weaken `--fail-on` to get a pass.
-4. Re-run the same scan. Repeat until the process exits 0. Check with `vibeguard scan --diff main --quiet`: a clean tree prints exactly `VIBEGUARD: PASS`.
-5. Use `--fix` when you want draft unified diffs for critical findings (`vibeguard scan --diff main --fix`). Read each draft, apply it only if it is a real fix, and scan again. `--fix` does not close medium or low findings; those still need a manual edit.
+3. Write the state-machine file and fix from it:
+
+   ```bash
+   vibeguard states .
+   ```
+
+   Read `VIBEGUARD_STATES.md`. It is the one file of states, invariants, and transition tables. For each row under "Confirmed invalid transitions", the code can reach that transition, including through a retry or a lock that outlives the call. Prioritize those rows by severity. Group rows that share a cause into one fix. For each group, add a regression test that reaches the bad transition, change the code so the transition ends (a retry must raise, return, or break; a lock must be released on every exit), then run `vibeguard states .` again so the file matches the code. Do not delete a confirmed row by hand.
+4. Fix the other findings by severity: critical, then high, then medium, then low. Change the code so the pattern is gone. Do not suppress a rule, skip a file, or weaken `--fail-on` to get a pass.
+5. Re-run the same scan. Repeat until the process exits 0. Check with `vibeguard scan --diff main --quiet`: a clean tree prints exactly `VIBEGUARD: PASS`.
+6. Use `--fix` when you want draft unified diffs for critical findings (`vibeguard scan --diff main --fix`). Read each draft, apply it only if it is a real fix, and scan again. `--fix` does not close medium or low findings; those still need a manual edit.
 
 Live Layer 2 calls `gemini-decision-1` when `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set. `--mode auto` falls back to the offline heuristic when neither key is present. Pass `--mode off` only for a fast Layer 1 check, not as the final audit.

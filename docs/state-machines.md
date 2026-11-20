@@ -1,5 +1,7 @@
 # VibeGuard state machines
 
+`vibeguard states` writes this kind of map for the repository it scans (`VIBEGUARD_STATES.md`): states, invariants, transition tables, and only the invalid transitions the code can reach. `D8.unbounded_retry` and `D8.lock_not_released` are those confirmed rows. The audit skill then fixes them with tests and regenerates the file. This document is the map of the scanner itself, not the generated file.
+
 This file is the map of the states the scanner actually moves through. Each machine lists its states, the invariant that must hold, and the transitions the code takes. The last section records two defects that were reachable, including under a second process, and the tests that now keep them closed.
 
 Probabilities below are the Decisions API `noul` value: a calibrated yes-score in `0.01..0.99`. It is never `0` and never `1`.

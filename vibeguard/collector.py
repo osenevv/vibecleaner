@@ -55,6 +55,7 @@ _SKIP_DIRS = frozenset(
 _SKIPPED_FILES = frozenset(
     {
         "VIBEGUARD_REPORT.md",
+        "VIBEGUARD_STATES.md",
         ".vibeguard_cache.json",
         ".vibeguard_cache.json.lock",
         "vibeguard.sarif",

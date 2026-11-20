@@ -13,6 +13,7 @@ from tree_sitter import Node
 
 from vibeguard.models import Finding, Language, ScanContext, SourceFile
 from vibeguard.prose import detect_prose_tics
+from vibeguard.states import detect_state_bugs
 from vibeguard.ts_parse import attr_leaf as _attr_leaf
 from vibeguard.ts_parse import callee_name as _callee_name
 from vibeguard.ts_parse import decorator_leaf as _decorator_leaf
@@ -30,6 +31,7 @@ __all__ = [
     "detect_passthrough_wrappers",
     "detect_prose_tics",
     "detect_secrets",
+    "detect_state_bugs",
     "detect_silent_exceptions",
     "detect_supabase_rls",
     "detect_supabase_rls_all",
@@ -233,6 +235,7 @@ def run_deterministic(ctx: ScanContext) -> list[Finding]:
         findings.extend(detect_deprecated_sdk(source))
         findings.extend(detect_passthrough_wrappers(source))
         findings.extend(detect_prose_tics(source))
+        findings.extend(detect_state_bugs(source))
     # RLS is decided across the whole migration set: a later file may enable it.
     findings.extend(detect_supabase_rls_all(ctx.files))
     return _dedupe(findings)

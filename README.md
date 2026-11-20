@@ -40,6 +40,7 @@ vibeguard scan .                          # full scan, writes VIBEGUARD_REPORT.m
 vibeguard scan . --diff main              # only functions changed since main (PRs, hooks)
 vibeguard scan . --sarif vibeguard.sarif  # SARIF for GitHub code scanning
 vibeguard scan . --quiet                  # agent hooks: prints only `VIBEGUARD: PASS` when clean
+vibeguard states .                        # write VIBEGUARD_STATES.md and exit 1 on a confirmed bad transition
 vibeguard scan . --json                   # machine-readable output only
 vibeguard scan . --fix                    # draft patches for critical findings (noul ≥ 0.85)
 ```
@@ -64,6 +65,7 @@ Add `.vibeguard_cache.json` and `VIBEGUARD_REPORT.md` to your `.gitignore`. Put 
 | D2 | 1 | `CREATE TABLE` in Supabase migrations without `ENABLE ROW LEVEL SECURITY` or without `CREATE POLICY` (checked across all migrations); `allow_origins=["*"]` / `origin: '*'` combined with credentials. |
 | D6a | 1 | `except Exception: pass`, bare `except:`, empty `catch {}`; god files (> 500 LOC mixing SQL, HTTP and business logic); deprecated SDK calls (`openai.ChatCompletion.create`, Pydantic v1 `@validator` / `.dict()`, `new OpenAIApi`); `*args, **kwargs` pass-through wrappers. |
 | D6c | 1 | LLM prose tics in `.md`, `.mdx`, `.rst`, and `.html` docs. A high-precision slice of the [declauding](https://github.com/oaustegard/claude-skills/releases/tag/declauding-v0.13.0) register: chatbot residue, knowledge-cutoff disclaimers, stock vocabulary, copula avoidance, staged reveals, and docs that describe the change instead of the behavior. Low severity. Changelogs are skipped, and so are the declauding shapes that ordinary technical writing uses (bold-label lists, contrasts, short paragraphs, absolute negatives). |
+| D8 | 1 | State machines. `vibeguard states` writes `VIBEGUARD_STATES.md` with states, invariants, and transition tables. The scan flags a transition the code can enter and not finish: a `while True` retry whose catch never raises, returns, or breaks; a bounded retry that falls through after every attempt failed; and a `lock.acquire()` with no `with` and no `finally` release. |
 | D3 | 2 | An unauthenticated caller can trigger a write or paid API call, considering middleware matchers and router-level dependencies. |
 | D4 | 2 | Handler trusts `user_id`, `org_id`, `role`, `is_admin`, `price` or `amount` from the client. |
 | D5 | 2 | User text in LLM system instructions, or untrusted input reaching shell, SQL, file-write or webhook tools without validation. |
@@ -167,7 +169,7 @@ Takeaways: the deterministic layer is exact on every set. The offline Layer 2 he
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                                   # 73 tests, < 1 s, no network
+pytest -q                                   # 78 tests, < 1 s, no network
 python benchmarks/run_eval.py --mode offline
 vibeguard scan . --mode offline             # VibeGuard passes its own gate
 scripts/demo.sh                             # ~40 s terminal demo on a throwaway vibe-coded app

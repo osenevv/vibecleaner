@@ -103,6 +103,18 @@ RULES: dict[str, RuleSpec] = {
             "State the fact in plain technical prose. A hit is a candidate: quoted specimens and the author's own voice are not tics.",
         ),
         RuleSpec(
+            "D8.unbounded_retry", "D8", "Retry cannot reach a terminal state", Category.SLOP, Severity.HIGH, 1,
+            "Bound the attempts and raise, return, or break on the last failure so a caught error cannot spin forever.",
+        ),
+        RuleSpec(
+            "D8.retry_falls_through", "D8", "Retry ends as success after every attempt failed", Category.SLOP, Severity.HIGH, 1,
+            "After the last caught failure, raise or return an error. Do not fall out of the loop into the caller's success path.",
+        ),
+        RuleSpec(
+            "D8.lock_not_released", "D8", "Lock acquired without a release path", Category.SLOP, Severity.HIGH, 1,
+            "Acquire inside a with-statement, or release in a finally that runs on every exit after the acquire.",
+        ),
+        RuleSpec(
             "D3.missing_auth", "D3", "Missing authentication on mutating route", Category.SECURITY, Severity.CRITICAL, 2,
             "Require an authenticated session (route dependency, middleware matcher, or explicit session check) before the mutation.",
             question=(
