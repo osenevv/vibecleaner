@@ -30,21 +30,28 @@ def _git_with_main(repo: Path) -> None:
     subprocess.run(["git", "branch", "-M", "main"], cwd=repo, check=True)
 
 
+def _install_tool(bin_dir: Path, name: str, source: str) -> None:
+    if os.name == "nt":
+        wrapper = bin_dir / name
+        if not wrapper.exists():
+            target = Path(source).as_posix()
+            wrapper.write_text(f'#!/bin/sh\nexec "{target}" "$@"\n', encoding="utf-8", newline="\n")
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return
+    link = bin_dir / name
+    if not link.exists():
+        link.symlink_to(source)
+
+
 def _tool_bin(bin_dir: Path) -> None:
     python = shutil.which("python3") or shutil.which("python")
     assert python is not None
     for name in ("git", "mktemp", "rm", "cat", "tr", "dirname"):
         source = shutil.which(name)
         assert source is not None
-        suffix = Path(source).suffix if os.name == "nt" else ""
-        link = bin_dir / f"{name}{suffix}"
-        if not link.exists():
-            link.symlink_to(source)
-    py_suffix = Path(python).suffix if os.name == "nt" else ""
+        _install_tool(bin_dir, name, source)
     for name in ("python3", "python"):
-        link = bin_dir / f"{name}{py_suffix}"
-        if not link.exists():
-            link.symlink_to(python)
+        _install_tool(bin_dir, name, python)
 
 
 def _fake_vibecleaner(bin_dir: Path, record: Path, *, code: int, stdout: str = "", stderr: str = "") -> None:
