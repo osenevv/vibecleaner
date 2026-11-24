@@ -1,8 +1,8 @@
-# VibeCleaner (`vibecleaner`)
+# VibeCleaner
 
-Pre-ship security and anti-slop checks for AI-generated Python, TypeScript, and Supabase apps.
+Pre-ship security scanner, deterministic slop cleaner, and worktree-isolated fixer for AI-generated repositories.
 
-VibeCleaner catches leaked keys, missing Supabase Row Level Security, unauthenticated write routes, client-trusted prices, prompt injection, and AI code slop before you deploy. It runs a fast local tree-sitter gate ($0, < 1 s) followed by `gemini-decision-1` semantic checks (or a zero-network offline fallback when no API key is set).
+VibeCleaner audits Python, TypeScript, JavaScript, HTML/CSS, and Supabase SQL for security holes and AI slop, removes provable residue deterministically without breaking public APIs, and runs project tests, tamper guards, and host-agent repairs on isolated git branches.
 
 ## Quick start
 
@@ -13,12 +13,12 @@ pip install -e ".[dev]"
 
 vibecleaner init        # updates .gitignore, installs pre-push hook and detected editor rules
 vibecleaner             # scans the repo, explains risks in plain English, prints a Fix Prompt
+vibecleaner fix .       # removes provable code/prose/UI slop; runs host pass if VIBECLEANER_HOST is set
+vibecleaner start .     # runs scan, project tests, runtime probe, and worktree fixer with tamper guard
 vibecleaner --autofix   # hands the Fix Prompt to claude/codex/gemini/agy (or clipboard) and re-scans
 ```
 
-(`vibecleaner` is also installed as an alias for all commands.)
-
-Requires Python 3.11+. Export `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) to enable live `gemini-decision-1` checks. Without a key, `--mode auto` uses the offline heuristic judge at $0.
+Requires Python 3.11+. Without an API key, `--mode auto` uses the zero-network offline heuristic judge ($0). For live Layer 2 semantic checks, set a decision API key (`TYPESAFE_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `PERPLEXITY_API_KEY`, `LIQUID_API_KEY`, `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`, `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`, or `LAYA_BASE_URL`; override selection with `VIBECLEANER_JUDGE`).
 
 ## How it works
 
@@ -33,13 +33,15 @@ Layer 1  Deterministic gate (tree-sitter AST + regex, $0, < 1 s)
         |  with --diff: Layer 1 on changed files, Layer 2 on changed functions
         |  <= 30 modules / 30K tokens per request
         v
-Layer 2  gemini-decision-1 (one yes/no question per defect, zero output tokens)
+Layer 2  Decision judge (one yes/no question per defect, zero output tokens)
+         Routes to Jev, Gemini, OpenAI Decisions, Clef, Perplexity, Liquid, Microsoft, or Laya
          D3 missing auth, D4 IDOR / price trust, D5 prompt injection
          D6b fake/stubbed logic, D7a N+1 / unbounded query, D7b missing schema
         |  findings at probability >= 0.75
         v
 Layer 3  Terminal (plain-English summary + Fix Prompt), VIBECLEANER_REPORT.md, SARIF 2.1.0, JSON
          Security and Anti-Slop scores (0-100), review tier 1-4, optional --fix diffs
+         fix / start: deterministic cleanup, worktree repairs, tamper guard, runtime & browser probes
 ```
 
 ## Commands
@@ -56,6 +58,7 @@ vibecleaner scan . --quiet                  # agent hooks: prints only `VIBECLEA
 vibecleaner scan . --json                   # machine-readable output, including `review`
 vibecleaner scan . --fix                    # draft unified diffs for critical findings (p >= 0.85)
 vibecleaner fix .                           # delete proven slop; with VIBECLEANER_HOST, finish the rest
+vibecleaner start .                         # check static scan, project tests, runtime probe, and fix on a branch
 vibecleaner deslop .                        # group slop into 8 cleanup lanes (VIBECLEANER_DESLOP.md)
 vibecleaner preflight .                     # 42 read-only launch checks (VIBECLEANER_PREFLIGHT.md)
 vibecleaner states .                        # state machines and stuck transitions (VIBECLEANER_STATES.md)
@@ -68,7 +71,7 @@ Key `scan` flags:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--mode auto\|live\|offline\|off` | `auto` | `live` = `gemini-decision-1`, `offline` = heuristic judge, `off` = Layer 1 only, `auto` = live if a key is set |
+| `--mode auto\|live\|offline\|off` | `auto` | `live` = routed decision API, `offline` = heuristic judge, `off` = Layer 1 only, `auto` = live if a key is set |
 | `--threshold` | `0.75` | probability cut-off (`0.01` to `0.99`) |
 | `--fail-on critical\|high\|medium\|low\|none` | `high` | lowest severity that exits 1 (`deslop` defaults to `medium`) |
 | `--report PATH` / `--no-report` | `<root>/VIBECLEANER_REPORT.md` | markdown report path |
@@ -88,7 +91,7 @@ Exit codes: `0` pass, `1` finding at or above `--fail-on` (or a preflight blocke
 | D6a | 1 | Silent exception handlers (`except Exception: pass`, bare `except:`, empty `catch {}`); god files (> 500 LOC mixing SQL, HTTP, and business logic); deprecated SDK calls (`openai.ChatCompletion.create`, Pydantic v1 `@validator`/`.dict()`, `new OpenAIApi`); `*args, **kwargs` pass-through wrappers. |
 | D6c | 1 | AI prose slop in `.md`, `.mdx`, `.rst`, and `.html` docs: chatbot residue, cutoff disclaimers, buzzwords, significance puffery, emphasis crutches, temporal clichés, weasel attribution, and meta-commentary. Low severity; skips changelogs and ordinary technical writing. |
 | D8 | 1 | Stuck state transitions: unbounded `while True` / `while (true)` retries whose try block never exits, bounded retries that fall through after failure, and `acquire`/`lock` calls missing `with`/`using`/`finally` release on the same receiver. |
-| D9 | 1 | Deslop: weak types (`any`, `as any`, `as unknown as`, bare `# type: ignore`, whole-annotation `Any`), debug leftovers (`debugger`, `breakpoint()`, `console.log` outside tests/scripts), AI comment slop (in-progress narration, banner dividers, `Step N:` walkthroughs, empty labels, decorative emoji, block end-markers), `_old`/`_legacy`/`_v1` copies, rethrow-only catches, unused privates, duplicate function bodies, circular imports. |
+| D9 | 1 | Deslop and production gaps: weak types (`any`, `as any`, `as unknown as`, bare `# type: ignore`, whole-annotation `Any`), debug leftovers (`debugger`, `breakpoint()`, `console.log` outside tests/scripts), AI comment slop, `_old`/`_legacy`/`_v1` copies, rethrow-only catches, unused privates, duplicate function bodies, circular imports, undeclared manifest imports, production mocks, tautology/network tests, and opt-in registry/OSV checks (`VIBECLEANER_ONLINE_CHECKS=1`). |
 | D3 | 2 | Unauthenticated write or paid API endpoints, accounting for middleware matchers and router-level dependencies. |
 | D4 | 2 | Handlers trusting client-supplied `user_id`, `org_id`, `role`, `is_admin`, `price`, or `amount`. |
 | D5 | 2 | User input concatenated into LLM system instructions, or untrusted input reaching shell, SQL, file-write, or webhook tools without validation. |
@@ -102,6 +105,11 @@ Exit codes: `0` pass, `1` finding at or above `--fail-on` (or a preflight blocke
 - **Content-hash cache:** `sha256(question set + auth context + function source)` with separate live and offline namespaces. Unchanged functions cost 0 tokens.
 - **Short-circuit:** VibeCleaner skips Layer 2 for any function that already has a critical Layer 1 hit (such as a leaked key).
 - **Low token cost:** `gemini-decision-1` uses $0.10 per 1M input tokens and $0 output tokens (a typical PR diff costs under $0.001).
+
+## Cleanup and automated fixing (`fix` and `start`)
+
+- **`vibecleaner fix .`** applies deterministic, idempotent edits that preserve public functions and skip high-risk files: removes debug leftovers, AI comment tics, unused privates, rethrow-only catches, internal pass-through wrappers, duplicate bodies, lorem sentences, gradients/glass, hex colors (rewritten to `oklch(...)` tokens), empty CSS rules, and duplicate primary buttons. Checkpoints are stored in `.vibecleaner/checkpoint.json` so individual rules can be reverted. When `VIBECLEANER_HOST` is set, remaining findings are sent one file at a time, and pages receive a single file-based five-step interface instruction (`ground`, `words`, `page`, `motion`, `check`).
+- **`vibecleaner start .`** (alias `run`) runs the offline static scan, the repository's own test/lint/type commands (in Docker for Python, Node, Go, Rust, and JVM, or on the host with `--sandbox host`), and a localhost HTTP probe on detected web servers (`runtime/check.py`, plus optional Playwright desktop/phone overflow checks in `runtime/browser.py`). When a gate fails and `VIBECLEANER_HOST` is set, `start` snapshots tests, config, and public signatures, runs repairs in an isolated git worktree with tamper checking (`verify/tamper.py`), jury review (`jury/panel.py`), and repeat-diff stopping, and commits passing fixes to `vibecleaner/fix-<id>`.
 
 ## Deslop
 
@@ -216,13 +224,16 @@ vibecleaner deslop .
 ## Data & Privacy
 
 - **`--mode offline` and `--mode off`:** 100% local. No network requests are made and no source code leaves your machine.
-- **`--mode live` (or `--mode auto` with an API key set):** Sends redacted function slices (with detected secrets masked) and the global auth-context summary to the configured Decisions API (`gemini-decision-1`). Results are cached locally in `.vibecleaner_cache.json` by content hash.
+- **`--mode live` (or `--mode auto` with an API key set):** Sends redacted function slices (with detected secrets masked) and the global auth-context summary to the routed Decisions API (`VIBECLEANER_JUDGE` or the first configured key). Results are cached locally in `.vibecleaner_cache.json` by content hash and model id.
+- **`VIBECLEANER_ONLINE_CHECKS=1`:** Opt-in flag enabling Layer 1 PyPI/OSV registry lookups (`D9.registry_missing`). Off by default so Layer 1 makes no network calls.
 - **`--fix`:** Sends flagged function bodies to `VIBECLEANER_FIX_MODEL` (default `gemini-2.5-flash`) to draft diffs for review.
-- **`--autofix`:** Runs your locally installed coding agent CLI (`claude`, `codex`, `gemini`, or `agy`) in the repository and rejects edits that weaken or delete tests.
+- **`--autofix` and `start`:** Run your locally installed coding agent CLI (`claude`, `codex`, `gemini`, or `agy`) and reject edits that weaken or delete tests, config, or public signatures.
 
 ## Limitations
 
 - Offline heuristics use regex and indentation rules; use live mode for production security audits.
 - VibeCleaner resolves cross-file path-prefix auth through the global auth context, not a full import graph.
 - `--fix` uses a generative Gemini model (`VIBECLEANER_FIX_MODEL`, default `gemini-2.5-flash`) to draft diffs for review and never applies them directly.
-- We have not benchmarked live `gemini-decision-1` accuracy in this repository because live runs require an API key.
+- Live decision-model accuracy has not been benchmarked in CI because live runs require API keys.
+- Browser rendering checks (`runtime/browser.py`) require Playwright to be installed separately; without it, layout and contrast checks stay instructions to the host agent.
+- Deep AST cleanup covers Python, TypeScript/JavaScript, and HTML/CSS; Go, Rust, and JVM have sandbox image support and manifest/basic checks.
