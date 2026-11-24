@@ -13,9 +13,13 @@ from pathlib import Path
 
 from vibecleaner.fix_contract import ExecResult, Sandbox, SandboxUnavailable
 from vibecleaner.verify.files import project_runtimes
+from typing import Literal
 
 _PY_IMAGE = "python:3.12-slim"
 _NODE_IMAGE = "node:22-slim"
+_GO_IMAGE = "golang:1.22-alpine"
+_RUST_IMAGE = "rust:1.80-slim"
+_JVM_IMAGE = "eclipse-temurin:21-jdk"
 _DOCKERFILE = (
     "FROM python:3.12-slim\n"
     "COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node\n"
@@ -26,7 +30,7 @@ _DOCKERFILE = (
 _KILL_TIMEOUT_S = 15
 
 
-def make_sandbox(root: Path, kind: str = "docker") -> Sandbox:
+def make_sandbox(root: Path, kind: Literal['host', 'docker'] = "docker") -> Sandbox:
     if kind == "host":
         return HostSandbox(root)
     if kind == "docker":
@@ -58,6 +62,12 @@ def choose_image(root: Path) -> str:
     runtimes = project_runtimes(root)
     if "python" in runtimes and "node" in runtimes:
         return combined_image_tag()
+    if "go" in runtimes:
+        return _GO_IMAGE
+    if "rust" in runtimes:
+        return _RUST_IMAGE
+    if "jvm" in runtimes:
+        return _JVM_IMAGE
     if "node" in runtimes:
         return _NODE_IMAGE
     return _PY_IMAGE

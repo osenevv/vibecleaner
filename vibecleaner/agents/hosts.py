@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -9,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vibecleaner.fix_contract import ExecResult, ProviderError
+from typing import Literal
 
 _PRESETS = frozenset({"claude", "codex", "gemini", "agy"})
 
 
-def preset_argv(name: str, instructions: str) -> list[str]:
+def preset_argv(name: Literal['claude', 'codex', 'agy', 'gemini'], instructions: str) -> list[str]:
     """Argv for a known agent preset. Flags match the installed CLIs' ``--help``."""
     if name == "claude":
         return ["claude", "-p", instructions, "--permission-mode", "acceptEdits"]
@@ -45,24 +47,14 @@ def execute_argv(
     if resolved:
         run_argv[0] = resolved
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             run_argv,
             cwd=cwd,
-            capture_output=capture,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            stdin=subprocess.DEVNULL if capture else None,
             text=True,
             errors="replace",
-            stdin=subprocess.DEVNULL if capture else None,
-            timeout=timeout_s,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return ExecResult(
-            command=tuple(argv),
-            returncode=124,
-            stdout=_captured(exc.stdout),
-            stderr=_captured(exc.stderr),
-            duration_s=time.monotonic() - started,
-            timed_out=True,
         )
     except FileNotFoundError as exc:
         if shutil.which(argv[0]) is None and not Path(argv[0]).is_file():
@@ -70,14 +62,46 @@ def execute_argv(
         raise ProviderError(f"failed to run {argv[0]} in {cwd}: {exc}") from exc
     except OSError as exc:
         raise ProviderError(f"failed to run {argv[0]} in {cwd}: {exc}") from exc
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _terminate_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+        return ExecResult(
+            command=tuple(argv),
+            returncode=124,
+            stdout=_captured(stdout),
+            stderr=_captured(stderr),
+            duration_s=time.monotonic() - started,
+            timed_out=True,
+        )
     return ExecResult(
         command=tuple(argv),
         returncode=proc.returncode,
-        stdout=_captured(proc.stdout),
-        stderr=_captured(proc.stderr),
+        stdout=_captured(stdout),
+        stderr=_captured(stderr),
         duration_s=time.monotonic() - started,
         timed_out=False,
     )
+
+
+def _terminate_tree(proc: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        proc.kill()
 
 
 def _captured(value: object) -> str:

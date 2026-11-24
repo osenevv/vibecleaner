@@ -52,11 +52,11 @@ from vibecleaner.preflight.patterns import (
 )
 from vibecleaner.preflight.results import CheckResult, Status, _evidence, _make, _uniq
 from vibecleaner.preflight.signals import _accounts, _auth, _database, detect_stack
+from vibecleaner.preflight.code_text import is_prose_path
 from vibecleaner.preflight.view import (
     RepoView,
     _is_comment,
     _is_env_file,
-    _is_prose_path,
     _is_scannable_source,
     _is_test_path,
     _strip_strings,
@@ -218,7 +218,7 @@ def _xss_hits(view: RepoView) -> tuple[list[str], list[str]]:
     problems: list[str] = []
     warnings: list[str] = []
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         if not is_blankable(source) and not is_markup_path(source.path):
             continue

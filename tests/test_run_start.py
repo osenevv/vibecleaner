@@ -51,13 +51,11 @@ def test_secret_without_a_team_asks_the_user(tmp_path: Path) -> None:
     assert "app.py" in result.evidence[0].summary
 
 
-def test_fix_and_run_mean_start(tmp_path: Path) -> None:
+def test_run_means_start(tmp_path: Path) -> None:
     init_git(tmp_path)
     (tmp_path / "README.md").write_text("A library.\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "docs"], cwd=tmp_path, check=True)
-    assert main(["fix", str(tmp_path), "--sandbox", "host", "--no-local", "--json"]) == 0
-    (tmp_path / "VIBECLEANER_RUN.md").unlink()
     assert main(["run", str(tmp_path), "--sandbox", "host", "--no-local", "--json"]) == 0
 
 

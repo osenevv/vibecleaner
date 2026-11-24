@@ -1,0 +1,10 @@
+{
+  "frozen": true,
+  "residue": [
+    {"file": "service.py", "line": 7, "rule": "D9.debug_leftover"},
+    {"file": "service.py", "line": 11, "rule": "D9.unused_private"}
+  ],
+  "lookalikes": [
+    {"file": "service.py", "line": 15, "symbol": "format_total"}
+  ]
+}

@@ -28,10 +28,29 @@ _MAPPED = (
     "D9.unused_private",
     "D9.duplicate_function",
     "D9.circular_import",
+    "D9.mocked_production",
+    "D9.missing_dependency",
+    "D9.slopsquat",
+    "D9.contract_drift",
+    "D9.migration_hazard",
+    "D9.env_parity",
+    "D9.assertion_gap",
+    "D9.flaky_test",
+    "D9.prompt_leak",
+    "D9.missing_telemetry",
+    "D9.loop_io",
+    "D9.boundary_schema",
+    "D9.graphql_drift",
+    "D9.registry_missing",
     "D6a.silent_exception",
     "D6a.deprecated_sdk",
     "D6a.passthrough_wrapper",
     "D6a.god_file",
+    "D6a.implicit_coupling",
+    "D6a.layer_folder",
+    "D6a.illegal_state",
+    "D6a.shotgun_surgery",
+    "D6a.layering_violation",
     "D6b.hardcoded_mock_stub",
     "D6c.llm_prose",
 )
@@ -80,6 +99,8 @@ def test_concerns_cover_lanes_and_score_weights() -> None:
     assert DESLOP_CONCERNS["D6a.passthrough_wrapper"] == "dedupe"
     assert DESLOP_CONCERNS["D6a.god_file"] == "dedupe"
     assert DESLOP_CONCERNS["D9.circular_import"] == "cycles"
+    assert DESLOP_CONCERNS["D9.mocked_production"] == "ai-slop"
+    assert DESLOP_CONCERNS["D9.missing_dependency"] == "legacy"
     assert all(brief.endswith(".") and len(brief.split()) > 8 for brief in CONCERN_BRIEFS.values())
 
     medium = Finding("D9.weak_type", "a.ts", 1, "any")

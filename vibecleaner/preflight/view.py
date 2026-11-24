@@ -19,7 +19,9 @@ from vibecleaner.preflight.code_text import (
 from vibecleaner.preflight.patterns import _ENV_EXAMPLES, _STRING_LIT
 from vibecleaner.preflight.results import _uniq
 
-__all__ = ["_code_text", "_is_env_file", "_is_example_env", "_is_prose_path", "_strip_strings"]
+__all__ = ["_code_text", "_is_env_file", "_is_example_env", "_strip_strings"]
+
+
 
 
 def _is_comment(line: str) -> bool:
@@ -33,8 +35,6 @@ def _is_comment(line: str) -> bool:
     return False
 
 
-def _is_prose_path(path: str) -> bool:
-    return is_prose_path(path)
 
 
 def _is_scannable_source(source: SourceFile) -> bool:
@@ -45,7 +45,7 @@ def _is_scannable_source(source: SourceFile) -> bool:
 
 
 def _is_usage_source(source: SourceFile) -> bool:
-    if _is_prose_path(source.path):
+    if is_prose_path(source.path):
         return False
     return (
         is_blankable(source)

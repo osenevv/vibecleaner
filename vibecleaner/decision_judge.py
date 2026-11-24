@@ -585,7 +585,7 @@ def judge(
 
 
 def select_backend(mode: str) -> DecisionBackend | None:
-    """``auto`` uses live when an API key is set, otherwise the offline heuristic."""
+    """``auto`` uses live when any decision API key is set, otherwise the offline heuristic."""
     normalized = mode.strip().lower()
     if normalized not in {"auto", "live", "offline", "off"}:
         raise DecisionAPIError(
@@ -595,14 +595,26 @@ def select_backend(mode: str) -> DecisionBackend | None:
         return None
     if normalized == "offline":
         return OfflineHeuristicBackend()
-    key = api_key()
-    if normalized == "auto":
-        if key:
-            return GeminiDecisionBackend(api_key=key)
-        return OfflineHeuristicBackend()
-    if not key:
+    from vibecleaner.judge_backends import (
+        OpenAIDecisionBackend,
+        SystemOneDecisionBackend,
+        resolve_judge_route,
+    )
+
+    try:
+        route = resolve_judge_route()
+    except ValueError as exc:
+        raise DecisionAPIError(str(exc)) from exc
+    if route is None:
+        if normalized == "auto":
+            return OfflineHeuristicBackend()
         raise DecisionAPIError(
-            "mode 'live' requires GEMINI_API_KEY or GOOGLE_API_KEY to call gemini-decision-1. "
+            "mode 'live' requires a decision API key (TYPESAFE_API_KEY, GEMINI_API_KEY, "
+            "OPENAI_API_KEY, PERPLEXITY_API_KEY, LIQUID_API_KEY, or LAYA_BASE_URL). "
             "Export one of those, or rerun with --mode offline."
         )
-    return GeminiDecisionBackend(api_key=key)
+    if route.wire_format == "gemini":
+        return GeminiDecisionBackend(api_key=route.api_key)
+    if route.wire_format == "openai":
+        return OpenAIDecisionBackend(route)
+    return SystemOneDecisionBackend(route)

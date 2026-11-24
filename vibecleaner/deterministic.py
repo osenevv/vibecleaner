@@ -13,6 +13,9 @@ from tree_sitter import Node
 
 from vibecleaner.models import Finding, Language, ScanContext, SourceFile
 from vibecleaner.deslop import build_cross_refs, detect_deslop, detect_repo_deslop
+from vibecleaner.imports import missing_imports
+from vibecleaner.mocks import production_mocks
+from vibecleaner.production import production_findings, suppress
 from vibecleaner.prose import detect_prose_tics
 from vibecleaner.states import detect_state_bugs
 from vibecleaner.ts_parse import attr_leaf as _attr_leaf
@@ -242,7 +245,10 @@ def run_deterministic(ctx: ScanContext) -> list[Finding]:
     # RLS is decided across the whole migration set: a later file may enable it.
     findings.extend(detect_supabase_rls_all(ctx.files))
     findings.extend(detect_repo_deslop(ctx.files))
-    return _dedupe(findings)
+    findings.extend(production_mocks(ctx.files))
+    findings.extend(missing_imports(ctx.root, ctx.files))
+    findings.extend(production_findings(ctx.root, ctx.files))
+    return suppress(ctx.files, _dedupe(findings))
 
 
 def detect_secrets(f: SourceFile) -> list[Finding]:

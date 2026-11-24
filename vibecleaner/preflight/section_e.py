@@ -37,7 +37,8 @@ from vibecleaner.preflight.signals import (
     _service,
     _vendors,
 )
-from vibecleaner.preflight.view import RepoView, _is_comment, _is_prose_path, _is_test_path
+from vibecleaner.preflight.code_text import is_prose_path
+from vibecleaner.preflight.view import RepoView, _is_comment, _is_test_path
 
 
 def _legal_pages(view: RepoView) -> list[str]:
@@ -232,7 +233,7 @@ def check_38(view: RepoView) -> CheckResult:
         if _is_test_path(source.path):
             continue
         name = PurePosixPath(source.path).name.lower()
-        if _is_prose_path(source.path) and name != "robots.txt":
+        if is_prose_path(source.path) and name != "robots.txt":
             continue
         if name == "robots.txt" and _DISALLOW_ALL.search(source.text) and not _ALLOW_ROOT.search(source.text):
             noindex.append(f"{source.path}:1")

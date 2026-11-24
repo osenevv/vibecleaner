@@ -49,10 +49,29 @@ DESLOP_CONCERNS: dict[str, str] = {
     "D9.unused_private": "dead-code",
     "D9.duplicate_function": "dedupe",
     "D9.circular_import": "cycles",
+    "D9.mocked_production": "ai-slop",
+    "D9.missing_dependency": "legacy",
+    "D9.slopsquat": "legacy",
+    "D9.contract_drift": "ai-slop",
+    "D9.migration_hazard": "legacy",
+    "D9.env_parity": "ai-slop",
+    "D9.assertion_gap": "ai-slop",
+    "D9.flaky_test": "ai-slop",
+    "D9.prompt_leak": "ai-slop",
+    "D9.missing_telemetry": "ai-slop",
+    "D9.loop_io": "defensive-code",
+    "D9.boundary_schema": "defensive-code",
+    "D9.graphql_drift": "ai-slop",
+    "D9.registry_missing": "legacy",
     "D6a.silent_exception": "defensive-code",
     "D6a.deprecated_sdk": "legacy",
     "D6a.passthrough_wrapper": "dedupe",
     "D6a.god_file": "dedupe",
+    "D6a.implicit_coupling": "dedupe",
+    "D6a.layer_folder": "dedupe",
+    "D6a.illegal_state": "weak-types",
+    "D6a.shotgun_surgery": "dedupe",
+    "D6a.layering_violation": "cycles",
     "D6b.hardcoded_mock_stub": "ai-slop",
     "D6c.llm_prose": "ai-slop",
 }
@@ -938,12 +957,14 @@ def _class_name_of_method(node: Node) -> str | None:
 
 def _current_siblings(item: _Def, pool: list[_Def], *, cross_file_only: bool) -> list[_Def]:
     found: list[_Def] = []
+    if cross_file_only and item.name.startswith("_"):
+        return found
     for other in pool:
         if other.file == item.file and other.line == item.line and other.name == item.name:
             continue
         if other.scope != item.scope or other.directory != item.directory:
             continue
-        if cross_file_only and other.file == item.file:
+        if cross_file_only and (other.file == item.file or other.name.startswith("_")):
             continue
         if not cross_file_only and other.file != item.file:
             continue

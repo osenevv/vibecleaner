@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 from vibecleaner.cache import OFFLINE_MODEL, ChunkVerdict
 from vibecleaner.models import CodeUnit
+from vibecleaner.deterministic import _name_parts as _word_parts
 
 OFFLINE_HEURISTIC_VERSION = "4"
 
@@ -718,18 +719,13 @@ def _mount_covers(call: str, route_path: str | None) -> bool:
     return False
 
 
+
+
 def _dependency_leaf(name: str) -> str:
     parts = [part for part in re.split(r"\s*\.\s*", name) if part]
     return parts[-1] if parts else name
 
 
-def _word_parts(name: str) -> tuple[str, ...]:
-    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", name)
-    cleaned = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", cleaned)
-    cleaned = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", cleaned)
-    cleaned = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", cleaned)
-    cleaned = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", cleaned)
-    return tuple(part.lower() for part in cleaned.split() if part)
 
 
 def _part_is_auth(part: str) -> bool:

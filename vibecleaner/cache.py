@@ -21,6 +21,7 @@ from vibecleaner.models import (
     SEVERITY_QUESTION_CRITERIA,
     CodeUnit,
 )
+MODULE_RISK = "module_risk"
 
 log = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ class DecisionCache:
         entry = self._entries.get(cache_key(self.model, unit, auth_context))
         if not isinstance(entry, dict) or entry.get("model") != self.model:
             return None
-        return _bounded_risk(entry.get("module_risk"))
+        return _bounded_risk(entry.get(MODULE_RISK))
 
     def put(
         self,
@@ -130,7 +131,7 @@ class DecisionCache:
         entry: dict[str, object] = {"scores": stored, "model": self.model}
         risk = _bounded_risk(module_risk)
         if risk is not None:
-            entry["module_risk"] = risk
+            entry[MODULE_RISK] = risk
         if self._entries.get(key) == entry:
             return
         self._entries[key] = entry
@@ -247,9 +248,9 @@ def _parse_entry(entry: object) -> dict[str, object] | None:
     if scores is None:
         return None
     parsed: dict[str, object] = {"scores": scores, "model": model}
-    risk = _bounded_risk(entry.get("module_risk"))
+    risk = _bounded_risk(entry.get(MODULE_RISK))
     if risk is not None:
-        parsed["module_risk"] = risk
+        parsed[MODULE_RISK] = risk
     return parsed
 
 

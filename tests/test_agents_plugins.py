@@ -36,11 +36,13 @@ def _tool_bin(bin_dir: Path) -> None:
     for name in ("git", "mktemp", "rm", "cat", "tr", "dirname"):
         source = shutil.which(name)
         assert source is not None
-        link = bin_dir / name
+        suffix = Path(source).suffix if os.name == "nt" else ""
+        link = bin_dir / f"{name}{suffix}"
         if not link.exists():
             link.symlink_to(source)
+    py_suffix = Path(python).suffix if os.name == "nt" else ""
     for name in ("python3", "python"):
-        link = bin_dir / name
+        link = bin_dir / f"{name}{py_suffix}"
         if not link.exists():
             link.symlink_to(python)
 
@@ -48,7 +50,7 @@ def _tool_bin(bin_dir: Path) -> None:
 def _fake_vibecleaner(bin_dir: Path, record: Path, *, code: int, stdout: str = "", stderr: str = "") -> None:
     script = bin_dir / "vibecleaner"
     script.write_text(
-        f"#!{find_bash()}\n"
+        "#!/bin/sh\n"
         "if command -v python3 >/dev/null 2>&1; then py=python3; else py=python; fi\n"
         f'exec "$py" - {code} {stdout!r} {stderr!r} {str(record)!r} "$@" <<\'PY\'\n'
         "import json, pathlib, sys\n"

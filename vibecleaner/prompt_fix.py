@@ -176,9 +176,13 @@ def copy_to_clipboard(content: str) -> tuple[bool, str]:
     """Copy ``content`` to the OS clipboard using the first available clipboard tool."""
     allowed_cmds = _ALLOWED_CLIPBOARD_CMDS
     for name, cmd in _CLIPBOARD_COMMANDS:
-        if cmd not in allowed_cmds or shutil.which(cmd[0]) is None:
+        resolved = shutil.which(cmd[0]) if cmd in allowed_cmds else None
+        if resolved is None:
             continue
-        proc = subprocess.run(cmd, input=content, text=True, capture_output=True, check=False)
+        try:
+            proc = subprocess.run([resolved, *cmd[1:]], input=content, text=True, capture_output=True, check=False)
+        except OSError:
+            continue
         if proc.returncode == 0:
             return True, name
     return False, "no clipboard utility (pbcopy, wl-copy, xclip, xsel, clip) found on PATH"

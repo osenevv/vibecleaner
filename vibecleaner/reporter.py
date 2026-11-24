@@ -13,6 +13,7 @@ from vibecleaner import __version__
 from vibecleaner.models import PROJECT_RULE_PREFIX, RULES, Category, Finding, RuleSpec, ScanResult, Severity
 from vibecleaner.prompt_fix import build_fix_prompt, plain_explanation
 from vibecleaner.redact import redact_secrets
+from vibecleaner.cache import MODULE_RISK
 
 INPUT_USD_PER_MILLION = 0.10
 _PENALTY = {
@@ -289,7 +290,7 @@ def to_sarif(result: ScanResult) -> dict[str, object]:
                 "properties": {
                     "probability": finding.probability,
                     "layer": finding.layer,
-                    "module_risk": finding.module_risk,
+                    MODULE_RISK: finding.module_risk,
                 },
             }
         )
@@ -368,6 +369,43 @@ def _artifact_uri(result: ScanResult, file: str) -> str:
     return posix[2:] if posix.startswith("./") else posix
 
 
+def write_rows_sarif(rows: list[str], path: Path | str) -> None:
+    """SARIF 2.1.0 for fixer rows shaped as ``file:line rule message``."""
+    results = []
+    for row in rows:
+        file, _, rest = row.partition(":")
+        line_text, rule, message = rest.split(" ", 2)
+        results.append(
+            {
+                "ruleId": rule,
+                "level": "warning",
+                "message": {"text": message},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": file},
+                            "region": {"startLine": int(line_text)},
+                        }
+                    }
+                ],
+            }
+        )
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(
+            {
+                "$schema": _SARIF_SCHEMA,
+                "version": "2.1.0",
+                "runs": [{"tool": {"driver": {"name": "VibeCleaner", "version": __version__}}, "results": results}],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def write_sarif(result: ScanResult, path: Path | str) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -443,5 +481,5 @@ def _finding_json(finding: Finding) -> dict[str, object]:
         "detector": finding.detector,
         "snippet": finding.snippet,
         "fix_patch": redact_secrets(finding.fix_patch) if finding.fix_patch else None,
-        "module_risk": finding.module_risk,
+        MODULE_RISK: finding.module_risk,
     }

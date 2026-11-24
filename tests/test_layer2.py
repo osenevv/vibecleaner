@@ -634,8 +634,22 @@ def list_orders():
 
 
 def test_select_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    for var in (
+        "VIBECLEANER_JUDGE",
+        "TYPESAFE_API_KEY",
+        "JEV_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENAI_API_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "PERPLEXITY_API_KEY",
+        "LIQUID_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "LAYA_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
     assert select_backend("off") is None
     assert select_backend("auto").name == OFFLINE_MODEL
     assert select_backend("offline").name == OFFLINE_MODEL
@@ -861,6 +875,8 @@ def test_cli_exit_codes_quiet_json_and_flags(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    for var in ("TYPESAFE_API_KEY", "JEV_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY", "LIQUID_API_KEY", "LAYA_BASE_URL", "VIBECLEANER_JUDGE"):
+        monkeypatch.delenv(var, raising=False)
     clean_repo = tmp_path / "clean"
     clean_repo.mkdir()
     (clean_repo / "app.py").write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
@@ -1426,6 +1442,8 @@ def test_judge_errors_exit_2_and_quiet_never_passes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    for var in ("TYPESAFE_API_KEY", "JEV_API_KEY", "OPENAI_API_KEY", "PERPLEXITY_API_KEY", "LIQUID_API_KEY", "LAYA_BASE_URL", "VIBECLEANER_JUDGE"):
+        monkeypatch.delenv(var, raising=False)
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 

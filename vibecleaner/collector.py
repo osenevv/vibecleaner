@@ -35,6 +35,7 @@ __all__ = [
 _SKIP_DIRS = frozenset(
     {
         ".git",
+        ".vibecleaner",
         "node_modules",
         "dist",
         "build",

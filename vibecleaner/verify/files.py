@@ -140,14 +140,24 @@ def project_runtimes(root: Path) -> frozenset[str]:
         found.add("python")
     if any(root.glob("requirements*.txt")):
         found.add("python")
+    if (root / "go.mod").is_file():
+        found.add("go")
+    if (root / "Cargo.toml").is_file():
+        found.add("rust")
+    if any((root / name).is_file() for name in ("pom.xml", "build.gradle", "build.gradle.kts")):
+        found.add("jvm")
     for rel, _path in iter_files(root):
         language = language_for(rel)
         if language == Language.PYTHON:
             found.add("python")
         elif language in {Language.TYPESCRIPT, Language.TSX, Language.JAVASCRIPT}:
             found.add("node")
-        if found == {"python", "node"}:
-            break
+        elif rel.endswith(".go"):
+            found.add("go")
+        elif rel.endswith(".rs"):
+            found.add("rust")
+        elif rel.endswith((".java", ".kt", ".kts")):
+            found.add("jvm")
     return frozenset(found)
 
 

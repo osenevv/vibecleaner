@@ -55,6 +55,7 @@ vibecleaner scan . --sarif vibecleaner.sarif  # SARIF output for GitHub code sca
 vibecleaner scan . --quiet                  # agent hooks: prints only `VIBECLEANER: PASS` when clean
 vibecleaner scan . --json                   # machine-readable output, including `review`
 vibecleaner scan . --fix                    # draft unified diffs for critical findings (p >= 0.85)
+vibecleaner fix .                           # delete proven slop; with VIBECLEANER_HOST, finish the rest
 vibecleaner deslop .                        # group slop into 8 cleanup lanes (VIBECLEANER_DESLOP.md)
 vibecleaner preflight .                     # 42 read-only launch checks (VIBECLEANER_PREFLIGHT.md)
 vibecleaner states .                        # state machines and stuck transitions (VIBECLEANER_STATES.md)

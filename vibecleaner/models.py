@@ -100,6 +100,26 @@ RULES: dict[str, RuleSpec] = {
             "Call the wrapped function directly or give the wrapper a real responsibility.",
         ),
         RuleSpec(
+            "D6a.implicit_coupling", "D6a", "Shared string key with no named constant", Category.SLOP, Severity.MEDIUM, 1,
+            "Name the shared key once and import that name. A repeated string is a contract with no owner.",
+        ),
+        RuleSpec(
+            "D6a.layer_folder", "D6a", "Module filed by layer instead of feature", Category.SLOP, Severity.MEDIUM, 1,
+            "Move a layer-folder module next to the one feature that uses it, and update the imports.",
+        ),
+        RuleSpec(
+            "D6a.illegal_state", "D6a", "String status that can represent a value the code rejects", Category.SLOP, Severity.MEDIUM, 1,
+            "Annotate the parameter with the literals the function accepts.",
+        ),
+        RuleSpec(
+            "D6a.shotgun_surgery", "D6a", "Same logic copied across three or more modules", Category.SLOP, Severity.MEDIUM, 1,
+            "Keep one implementation and import it. A rule that lives in three files changes in three files.",
+        ),
+        RuleSpec(
+            "D6a.layering_violation", "D6a", "Inner layer imports an outer layer", Category.SLOP, Severity.MEDIUM, 1,
+            "Move the shared function inward so the outer layer imports the inner one.",
+        ),
+        RuleSpec(
             "D6c.llm_prose", "D6c", "LLM prose tic", Category.SLOP, Severity.LOW, 1,
             "State the fact in plain technical prose. A hit is a candidate: quoted specimens and the author's own voice are not tics.",
         ),
@@ -146,6 +166,82 @@ RULES: dict[str, RuleSpec] = {
         RuleSpec(
             "D9.circular_import", "D9", "Circular import between modules", Category.SLOP, Severity.MEDIUM, 1,
             "Break the cycle: move the shared piece into a module both sides import, or invert the dependency.",
+        ),
+        RuleSpec(
+            "D9.mocked_production", "D9", "Test mocks production code", Category.SLOP, Severity.HIGH, 1,
+            "Assert the real function. A mock may stand in for the network or the clock, not for the module this test claims to cover.",
+        ),
+        RuleSpec(
+            "D9.missing_dependency", "D9", "Import is not in the project manifest", Category.SLOP, Severity.HIGH, 1,
+            "Add the distribution to the manifest, or delete the import. A name the manifest does not list was not installed on purpose.",
+        ),
+        RuleSpec(
+            "D1.weak_crypto", "D1", "Weak hash or weak randomness", Category.SECURITY, Severity.MEDIUM, 1,
+            "Use SHA-256 or stronger for a fingerprint, and secrets.SystemRandom or crypto.randomBytes for a secret.",
+        ),
+        RuleSpec(
+            "D5.unsafe_sink", "D5", "Unsafe deserialization or injection sink", Category.SECURITY, Severity.HIGH, 1,
+            "Use a safe loader, a parameterised query, and a shell argument list. Do not render raw HTML from data.",
+        ),
+        RuleSpec(
+            "D9.slopsquat", "D9", "Dependency name is one edit from a popular package", Category.SLOP, Severity.HIGH, 1,
+            "Confirm the distribution on the registry. A one-character miss of a popular package is how a slopsquat is installed.",
+        ),
+        RuleSpec(
+            "D8.resource_leak", "D8", "Resource opened without a close on every path", Category.SLOP, Severity.MEDIUM, 1,
+            "Open the file, socket, or timer in a construct that closes it on every exit.",
+        ),
+        RuleSpec(
+            "D8.shared_state_race", "D8", "Check-then-act on shared state", Category.SLOP, Severity.MEDIUM, 1,
+            "Hold the lock across the check and the write, or use one atomic operation.",
+        ),
+        RuleSpec(
+            "D8.missing_timeout", "D8", "Outbound call without a timeout", Category.SLOP, Severity.MEDIUM, 1,
+            "Pass a timeout. A call with no deadline can stall the process.",
+        ),
+        RuleSpec(
+            "D9.contract_drift", "D9", "Route and OpenAPI spec disagree", Category.SLOP, Severity.MEDIUM, 1,
+            "Update the spec or the route so every path the server serves is the path the spec names.",
+        ),
+        RuleSpec(
+            "D9.migration_hazard", "D9", "Migration can lock or destroy data", Category.SLOP, Severity.HIGH, 1,
+            "Build the index concurrently, and expand or contract a column in two deploys instead of dropping it beside the code change.",
+        ),
+        RuleSpec(
+            "D9.env_parity", "D9", "Config key missing from the example env", Category.SLOP, Severity.MEDIUM, 1,
+            "Add the key to .env.example. A new variable the example does not name will be missing in deploy.",
+        ),
+        RuleSpec(
+            "D9.assertion_gap", "D9", "Test does not assert behavior", Category.SLOP, Severity.MEDIUM, 1,
+            "Assert the value the production function returns. assert True and a mock of the result do not count.",
+        ),
+        RuleSpec(
+            "D9.flaky_test", "D9", "Test depends on time, chance, or the network", Category.SLOP, Severity.MEDIUM, 1,
+            "Seed the clock and the random source, and stub the network at the boundary.",
+        ),
+        RuleSpec(
+            "D9.prompt_leak", "D9", "Pasted model prompt or disclaimer", Category.SLOP, Severity.LOW, 1,
+            "Delete the pasted prompt. A comment should state a constraint, not the chat that produced the edit.",
+        ),
+        RuleSpec(
+            "D9.missing_telemetry", "D9", "Mutating route has no log or trace", Category.SLOP, Severity.LOW, 1,
+            "Keep a structured log, a span, a metric, or a correlation id on the route.",
+        ),
+        RuleSpec(
+            "D9.loop_io", "D9", "I/O call inside a loop", Category.SLOP, Severity.MEDIUM, 1,
+            "Move the query or request out of the loop, or batch it. One call per item is an N+1.",
+        ),
+        RuleSpec(
+            "D9.boundary_schema", "D9", "Route reads a raw body with no schema", Category.SLOP, Severity.MEDIUM, 1,
+            "Validate the body with a schema before using the fields.",
+        ),
+        RuleSpec(
+            "D9.graphql_drift", "D9", "GraphQL field has no resolver", Category.SLOP, Severity.MEDIUM, 1,
+            "Add the resolver, or remove the field from the schema.",
+        ),
+        RuleSpec(
+            "D9.registry_missing", "D9", "Dependency is not on the public registry", Category.SLOP, Severity.HIGH, 1,
+            "Confirm the name on PyPI or npm. A 404 is a guess, a private registry, or a slopsquat.",
         ),
         RuleSpec(
             "D3.missing_auth", "D3", "Missing authentication on mutating route", Category.SECURITY, Severity.CRITICAL, 2,

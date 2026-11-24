@@ -78,8 +78,8 @@ def _comparable(ctx: FixContext, cwd: Path, targets: list[Target], notes: list[E
         if target.io:
             notes.append(judge_note(f"differential skipped io function {target.qualname}"))
             continue
-        if target.variadic or not target.parameters or any(not annotation for _kind, _name, annotation in target.parameters):
-            notes.append(judge_note(f"differential skipped: {target.qualname} has no type hints"))
+        if target.variadic:
+            notes.append(judge_note(f"differential skipped: {target.qualname} is variadic"))
             continue
         if target.path not in cached:
             cached[target.path] = _git_show(cwd, base_ref, target.path)
@@ -182,13 +182,14 @@ def _harness(cwd: Path, targets: list[Target], base_files: dict[str, Path]) -> s
         base_alias = "base_" + digest(target.path)
         new_alias = "new_" + digest(target.path)
         names = [name for _kind, name, _ann in target.parameters]
-        strategies = ", ".join(f"st.from_type({annotation})" for _kind, _name, annotation in target.parameters)
+        strategies = ", ".join(_strategy(annotation) for _kind, _name, annotation in target.parameters)
         call_base = _call(f"{base_alias}.{target.name}", target)
         call_new = _call(f"{new_alias}.{target.name}", target)
         fn_name = f"test_diff_{_safe(target.qualname)}_{target.start_line}"
+        given = f"@given({strategies})" if strategies else "@given()"
         lines.extend(
             [
-                f"@given({strategies})",
+                given,
                 f"def {fn_name}({', '.join(names)}):",
                 "    def _outcome(fn):",
                 "        try:",
@@ -202,6 +203,12 @@ def _harness(cwd: Path, targets: list[Target], base_files: dict[str, Path]) -> s
             ]
         )
     return "\n".join(lines)
+
+
+def _strategy(annotation: str) -> str:
+    if annotation:
+        return f"st.from_type({annotation})"
+    return "st.one_of(st.integers(), st.text(max_size=12), st.booleans())"
 
 
 def _call(fn: str, target: Target) -> str:

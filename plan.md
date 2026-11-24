@@ -1,126 +1,105 @@
-# Plan: make `vibecleaner start` fix code
+# Plan: remove the slop
 
-## What a run does today
+## Scope
 
-`vibecleaner scan` is the auditor. It walks Python, TypeScript, JavaScript, and SQL, runs the deterministic rules, asks six yes/no questions per sliced function, and writes a report. `deslop`, `preflight`, `states`, `rule`, and `init` do what the README says. `vibecleaner --autofix` hands a prompt to an external agent and scans again. It does not check that the agent left the tests alone.
+`vibecleaner` takes a repo an LLM wrote and deletes the residue. What remains is the job the repo already described, in the words and the behavior it already had.
 
-`vibecleaner start` is a checker, not a fixer. In `vibecleaner/run/loop.py` it does four things:
+Slop is a default the model reached for. A reader who has seen LLM output can point at it, and the repo's job does not need it. It sits in three places, and the same test covers all three: the thing is specific to this repo, or the run deletes it.
 
-1. If the git tree has uncommitted files outside `.vibecleaner/`, it stops and asks you to commit or stash. It does not touch those files.
-2. It runs the offline static scan.
-3. If that scan is clean, it runs the project's own test, lint, or type command. Detection covers Python, JavaScript, Go, Cargo, Make, Maven, Gradle, .NET, Ruby, PHP, and Mix. A `test`, `lint`, `typecheck`, or `build` string in `.vibecleaner/config.json` wins.
-4. It writes `VIBECLEANER_RUN.md` and returns ready, or a question.
+- **Code.** A success that did not happen. A stub, a swallowed failure, a debug leftover, a comment that narrates the edit, a dead private, a backup copy, a pass-through, a duplicated body, a type that exists to silence the checker.
+- **Words.** A sentence that could sit on another product unchanged. Chatbot residue, puffery, a label that names a different action than the handler, a number the repo never computed.
+- **The screen and the terminal.** Template chrome, a control that does nothing, a stack of equal actions, lorem, a help line that does not name the arguments, a slow command that is silent, an error path that prints success.
 
-It never returns fixed. A failing check becomes the question "fix the evidence below" even when a model is configured. Bare `vibecleaner` still means `scan`.
+A library has code and text. A CLI has the terminal as well. A web app has the page. The model that wrote the repo does not matter. Python, TypeScript, and a page are the proof. A further language is another parser in front of the same tells.
 
-Docker, when it is up, runs Python and Node. Other languages run only with `--sandbox host`.
+A repair deletes the residue, reconnects the action the repo already names, and rewrites a sentence so it says a fact the repo already had. Name, price, numbers, URLs, and the outputs of the real functions are copied into a fact table before any rewrite and have to survive it. The patch is a span the detector marked. The writer never receives the whole tree. The patch writer is whichever editor or API is already available. The re-scan decides whether the patch stays.
 
-## What is built and not called
+A repair adds nothing the repo never claimed: no feature, no metric, no customer, no second product area.
 
-`start` does not call these modules. They stay unused until the steps below wire them in.
+## Left out of this plan
 
-- `repair/workspace.py` creates worktrees, applies a diff, and commits.
-- `verify/tamper.py` compares tests, config, and public signatures with a snapshot taken before a patch.
-- `probes/` writes property tests, scores mutants, and diffs old behavior against new. Python and TypeScript use a grammar. Other languages get comparison, boolean, and integer edits on the changed lines.
-- `jury/panel.py` and `jury/scan_nodes.py` ask specialist questions and split the static findings into security, validation, and maintainability.
-- `runtime/detect.py` knows how to boot FastAPI, Flask, Express, and Next. `runtime/check.py` does not boot them. A detected server is reported as not run.
+Secrets, missing auth, row-level security, prompt injection, and client-trusted prices stay on `scan`. Launch checks stay on `preflight`. Tax, a live card charge, DNS, deliverability, and registrar 2FA stay listed and unclaimed.
 
-## What the user does
+The page instruction is five skills, in workflow order: ground, words, page, motion, check. Ground reads the product and a real reference. Words rewrites strings against the fact table. Page sets structure and states. Motion sets animation. Check reviews the result. A rule lives in one skill. A page is accepted when check is clean and the earlier skills still hold.
 
-One command, no flags: `vibecleaner`. It includes uncommitted files, picks who edits, picks how to run the tests, fixes, re-runs the checks, and commits on a new branch. The user does not stash, name a test command, choose a model, or run it again.
-
-Choices it makes on its own, in this order:
-
-- Who edits: the editor it was launched from, otherwise `claude`, `codex`, or `agy` on `PATH`, otherwise a local model that is already running, otherwise an API key already in the environment.
-- Who judges: the same route, not `gemini-decision-1` by default. See "Which model judges".
-- Where code runs: Docker if the daemon answers, otherwise this machine.
-- Which checks: `.vibecleaner/config.json` if the keys are set, otherwise the ecosystem files (`go.mod`, `package.json`, `Makefile`, `Cargo.toml`, and the rest). Each check has a few equivalent spellings (`python -m pytest` or `pytest`, `go test ./...` or `go test .`, `make test` or `make check`, `bundle exec rspec` or `rspec`). The first spelling that actually starts is the one that counts. A missing binary is not a failure while another spelling remains. It does not ask which command to run.
-- What to type: `vibecleaner`, `vibecleaner start`, `vibecleaner fix`, and `vibecleaner run` are the same command.
-
-The only stop that asks for something is: no editor and no model exist anywhere. The line names the one thing that would unlock a fix. Every other failure is retried inside the run.
-
-Auth, payment, and data-integrity edits are still committed when the checks pass. The last line names those files. It does not wait for an answer.
-
-Progress is a few plain lines. The end is either "ready" or "fixed on `vibecleaner/fix-<id>`". A model opinion without a failing command stays in `VIBECLEANER_RUN.md` and does not stop the run.
-
-## Which model judges
-
-The six yes/no questions stay. The model that answers them is a decision model: it returns a probability and writes no text. Chat models (Claude, GPT, Grok, Groq, Mistral, and the rest) can still write patches. They do not judge.
-
-Two wire formats cover the hosted decision APIs. Jev's System One shape is `state` plus `noul` questions. Google and OpenAI use their own decisions endpoints. The same six questions are sent either way. The cache key is the model id, so a Jev score is never reused as a Gemini score.
-
-| Routed key | Decision API | Model | Yes/no field |
-| --- | --- | --- | --- |
-| `TYPESAFE_API_KEY` or `JEV_API_KEY` | TypeSafe System One | `jev-latest` | `noul` |
-| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Gemini Decisions | `gemini-decision-1` | `noul` |
-| `OPENAI_API_KEY` | OpenAI Decisions, `POST /v1/decisions` | `gpt-6-luna` | `predicate` (the probability field) |
-| `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID` | Workers AI | `clef`, or `CLEF_MODEL` | Jev's `noul` body |
-| `PERPLEXITY_API_KEY` | Perplexity Decisions | `pplx-decider-latest` | `noul` |
-| `LIQUID_API_KEY` | Liquid `api.liquid.ai/decisions/v1/systemone` | `d1` | Jev's `noul` body |
-| `AZURE_OPENAI_API_KEY` on Foundry | Microsoft-Decision-1, `/providers/microsoft/v1/systemone` | `microsoft-decision-1` | Jev's `noul` body |
-| `LAYA_BASE_URL` | A Laya server you run | the checkpoint that server serves | Jev's `noul` body |
-
-`VIBECLEANER_JUDGE` names one of `jev`, `gemini`, `openai`, `clef`, `decider`, `d1`, `microsoft`, `laya` when more than one key is set. When it is unset, the order in the table wins: the first key that is set is the judge. No decision key keeps the offline heuristic. `mode live` no longer requires a Gemini key.
-
-### 0. Route the judge
-
-Before step 1, `decision_judge.select_backend` reads that table. One System One client serves Jev, Clef, Liquid, Microsoft-Decision-1, and Laya, because they take the same request. Gemini keeps its decisions client. OpenAI Decisions is a third client: the question type is `predicate` and the score is `probability`. The threshold stays 0.75 unless a sweep for that model says otherwise. OpenAI does not claim its probabilities are calibrated, so its route records that and still uses the same cutoff until the gold set says to move it.
-
-Check: with only `TYPESAFE_API_KEY`, only `OPENAI_API_KEY`, or only `PERPLEXITY_API_KEY`, a live scan does not call Gemini. With no decision key, the offline eval numbers stay put.
-
-## Steps
-
-Each step keeps `pytest`, the three offline evals, `vibecleaner scan . --mode offline --no-cache --quiet`, and `vibecleaner deslop .` green. Bare `vibecleaner` stays `scan` until step 6.
-
-### 1. One proven patch
-
-Change `run/loop.py` so a failing gate, and a team that can edit, produces one candidate.
-
-- Snapshot the tree with `verify.snapshot` before the edit.
-- Ask the host agent, or one patcher model, for a unified diff against the evidence and the spec.
-- Apply it in a worktree from `repair/workspace.py`.
-- Re-run the gate that failed and `check_tamper`. A weakened test, a new skip, or a surprise signature change drops the candidate.
-- When both pass, commit on `vibecleaner/fix-<id>` and return fixed, with the commit and the evidence.
-- When they fail, keep the user's branch as it was and try the next candidate in step 3. Do not stop to ask the user to fix it by hand.
-
-Check: a temp repo whose pytest fails, and a host double that edits the source and not the test, exits fixed and the hidden assertion passes. A double that deletes the test is rejected and the branch is unchanged.
-
-### 2. Call the checks that already exist
-
-After step 1, `start` runs this order and stops on the first hard failure: static scan, project gates, tamper guard, probes, runtime. Security and maintainability notes from `jury/scan_nodes.py` are sections in `VIBECLEANER_RUN.md`. They do not block unless they already blocked the static scan.
-
-`runtime_check` boots the command from `detect_app` on the host sandbox, sends one malformed request, and records the status code. A library still passes with the existing note. A server that dies on boot is a revise with that command as the evidence.
-
-Check: the step 1 repo still fixes. A one-file WSGI app that returns 500 for bad JSON becomes a revise. A README-only repo stays ready.
-
-### 3. Several candidates and a stop
-
-Generate four diffs from distinct root-cause lines. Each runs in its own worktree through the gate and the tamper guard. Rank the survivors in pairs, swapping A and B. Commit the winner.
-
-Stop without another model call when the set of findings and the diff hash repeat, or when two candidates for the same cause both fail. The result names the repeated cause and the branch is unchanged. It does not ask a follow-up question.
-
-Check: two honest diffs and one that deletes a test. The deleting diff is dropped, one honest diff is committed, and a scripted oscillation stops on the second repeat.
-
-### 4. Judges that can veto
-
-Wire `jury/panel.py` into the run after the gates pass and before the commit. The yes/no gate and the specialists both use the routed judge from "Which model judges". A specialist finding blocks only when its probe fails on the current tree. An unreproduced finding is a note. When a second provider exists, the judge is not the one that wrote the diff.
-
-Check: a probe that fails blocks the commit. A probe that passes stays in the report and the commit proceeds.
-
-### 5. Languages and sandbox images
-
-The property writer emits a test the detected command can run, not only a pytest or vitest file. Token mutants stay the fallback when there is no grammar.
-
-The Docker image is the repo Dockerfile or devcontainer when one exists, then a stock image for Go, Rust, and a JVM, then the host. The progress line names which one ran.
-
-Check: `benchmarks/repair/r11_make_only` is detected as `make test`. `r12_go_refund` is detected as `go test ./...` and runs under the Go image when Docker is up, using `/tmp/vg-go/go/bin/go` only as a host fallback.
-
-### 6. Make bare `vibecleaner` mean start
-
-Switch the no-argument command from `scan` to `start` in the same change as the README, `AGENTS.md`, the Claude Code and Codex Start skills, and the tests that assert the old default. `vibecleaner scan` keeps its flags and exit codes.
-
-The offline self-scan must print `VIBECLEANER: PASS`. Today it fails on `agents/hosts.py`, `prompt_fix.py`, and `run/gitcmd.py`, which pass argument lists to `subprocess` and do not invoke a shell. Teach the D5 heuristic that an argument vector is not a shell injection, and add those three files as clean lookalikes in the tests.
+Tests the model wrote do not decide the run. The planted behavior and the re-scan do. A test that only asserts the fake goes out with the fake.
 
 ## Done when
 
-`vibecleaner` with no arguments, in a dirty tree, with an editor or a model already available, fixes a failing test, commits that fix on a new branch, and leaves the previous branch as it was. A patch that deletes the test is not the commit. The user types nothing else.
+Three trees pass. Two are fixtures this plan describes. The third is frozen before any new rule, and no rule is edited to suit it.
+
+`benchmarks/slop/app` is a web app. The handler returns success without doing the thing the button names. The page is a stock template: a blue-to-purple gradient hero, glass on every surface, one pill radius and a large shadow on every block, a dot-grid background, emoji standing in for icons, three identical feature cards, more than one primary button, Inter as the only type decision. The flow is the success screenshot and nothing else: no loading, empty, or error state, an unlabeled field, a validation error that wipes the input, a control that does nothing, overflow at a phone width. Copy is residue from more than one model family. A paragraph in the hero stays true if the product name is swapped for another.
+
+`benchmarks/slop/app/holdout.html` is a different template: a centered stack of six equal buttons, a focus trap, lorem in the labels. It shares no color, no gradient, and no phrase with the first page.
+
+`benchmarks/slop/cli` is a command with no screen. Help is residue and does not name the arguments. The error path swallows the failure and prints success. A slow path prints nothing until it exits. A holdout stub returns a constant, never reads its input, and avoids every phrase the stub list names.
+
+`benchmarks/slop/blind` is a tree this plan does not describe. It is committed first. Its labels name the residue and the lookalikes. Rules and fixtures may change. That tree and its labels may not.
+
+Lookalikes stay in every tree: a catch that logs, an exported helper, a fenced quotation of a tic, a labeled field, a sentence that states the price, a comment that states a constraint the code hides, a shadow on a popover, a retry that ends in an error.
+
+After one run on each fixture:
+
+- The primary action returns the claimed result. The app's button does the operation the label names, and two submits leave one record. The CLI prints the planted output and exits non-zero on the planted bad input. The holdout stub is gone.
+- The slop score is 100. The second check, the one that does not use the phrase lists, is clean on the holdout page, the holdout dialect, and the holdout stub.
+- Words still contain the fact table and name the next action. A rewrite that adds a fact or drops the price is rejected. The primary control's label is the handler's action.
+- The first view shows the product, one fact from the table, and one primary action, and that action is the repaired handler. Invalid input keeps what was typed and names the field. An empty result says what to do next. While the request is in flight the page shows pending and does not show the result. A failure says what to do and leaves the record unchanged. The page holds at a phone width. Both pages pass. A page with the chrome scraped off and no fact of its own still fails.
+- On the CLI, `--help` names the command and its arguments, a bad input prints the field and the fix, a slow command prints that it is working, and success prints the result.
+- Lookalikes are still present.
+- A second run changes no file.
+
+The blind tree is scored and left unedited until both fixtures are idempotent. Then one fix run is recorded. A miss becomes a general tell, written so the fixtures would have caught it too. A tell that only matches the blind tree is thrown out.
+
+`fix` on this repository changes nothing, and the self-scan still prints `VIBECLEANER: PASS`.
+
+## How a run removes it
+
+Three passes. A pass re-checks its surface before the next starts. A patch that fails its check is dropped and the file stays as it was.
+
+1. **Code.** Apply the span edits the detector can prove: delete the debug statement, the tic comment, the unused private, the unused backup; unwrap a catch that only rethrows; inline a pass-through; collapse a duplicate only when free names bind the same way. Then one diff per remaining stub or fake success. A stub is a success path that returns a constant without reading the input it claims to use. Accept the diff only when a re-scan clears that finding, the primary action returns the claimed result, and tests, config, and public signatures are intact.
+2. **Text.** Run ground, then words. Ground writes the fact table. Words rewrites residue in docs, in-product strings, help, empty states, errors, and control labels. Accept the rewrite only when every fact is still there, no new fact appeared, the next action is named, the label matches the handler, and the prose scan is clean on the holdout dialect.
+3. **Surface.** On a page, run page, then motion, then check. Page removes template structure: a technique on every block, a repeated card whose only change is the title, a hero with no fact, more than one primary action, a control with no handler, a focus trap, placeholder labels, overflow at a phone width. It restores the states of the one action: pending, empty, error, kept input. Motion sets animation. Check reviews the files those steps changed. Accept the diff only when check is clean at both widths, the first view still shows one fact and one action, and the code and text scans are still clean. A CLI or a library records this pass as not applicable.
+
+The writer is the host it was launched from, else `claude`, `codex`, or `agy` on `PATH`, else a local model already running, else an API key already in the environment. With none of those, the proven code edits still apply and the report names the missing writer.
+
+## Steps
+
+### 1. Freeze the blind tree
+
+Copy a repo this plan does not describe into `benchmarks/slop/blind`. Label the residue and the lookalikes. Commit that pair before any new rule.
+
+Check: the labels exist, and a test fails if that tree or its labels change.
+
+### 2. Fixtures that fail for the right reason
+
+Add the app, the holdout page, and the CLI. The runner executes the primary action, scans code, scans copy, and records the structural tells at both widths.
+
+Check: the runner names a costume success, an interchangeable paragraph, a structural template tell, the phone overflow, and the holdout stub. The holdout page is flagged. Lookalikes are not.
+
+### 3. Code
+
+Ship the proven span edits, then the structural stub.
+
+Check: the app's button does the named operation and two submits leave one record. The CLI prints the planted output and exits non-zero on bad input. The holdout stub is gone. A patch that deletes a test is rejected. A catch that logs is still there.
+
+### 4. Text
+
+Extract facts, rewrite, re-scan. Cover help, errors, empty text, control labels, and a paragraph that names no fact.
+
+Check: name and price survive. The next action is still stated. The primary control's label is the handler's action. An added testimonial or metric is rejected. The interchangeable paragraph is gone. A fenced quotation of a tic remains.
+
+### 5. Surface
+
+Run page, then motion, then check, on both pages. Words has already run.
+
+Check: both pages are clean at desktop width and at phone width. The first view has the product, one fact, and one action. Pending, empty, error, and kept input hold. A page that only had its chrome removed still fails. The CLI help, error, slow path, and success line pass. Code and text scans stay clean.
+
+### 6. The command
+
+`vibecleaner fix` runs code, then text, then the surface. Exit 0 only when the fixture bar holds. Exit 1 writes the remaining residue. A second run changes no file. The same command prints the blind score beside the fixture result.
+
+Check: both fixtures exit 0 and the second run is empty. The blind score is recorded. `fix` on this repository changes nothing.
+
+## Left unclaimed
+
+Tax, a live card charge, DNS, deliverability, and registrar 2FA stay in the report as not checked. The command does not invent a vendor account or a passing result for a check it did not run. Security findings stay on `scan`.

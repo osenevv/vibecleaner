@@ -36,7 +36,9 @@ def _build_fullstack_repo(root: Path) -> None:
     )
     (root / "tests").mkdir()
     (root / "tests" / "test_api.py").write_text(
-        "def test_ok() -> None:\n    assert True\n",
+        "from api.routes import create_order\n\n"
+        "def test_create_order() -> None:\n"
+        "    assert create_order('sku_1', 'user_1') == {'item_id': 'sku_1', 'user': 'user_1'}\n",
         encoding="utf-8",
     )
 

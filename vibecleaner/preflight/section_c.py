@@ -22,12 +22,12 @@ from vibecleaner.preflight.patterns import (
 )
 from vibecleaner.preflight.results import CheckResult, Status, _evidence, _make, _uniq
 from vibecleaner.preflight.signals import _na_payment, _payments
+from vibecleaner.preflight.code_text import is_prose_path
 from vibecleaner.preflight.view import (
     RepoView,
     _code_text,
     _is_comment,
     _is_example_env,
-    _is_prose_path,
     _is_test_path,
 )
 
@@ -75,7 +75,7 @@ def check_20(view: RepoView) -> CheckResult:
     idor = view.locs_for(_D4)
     client: list[str] = []
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         if not _CLIENT_PRICE.search(_code_text(source)):
             continue
@@ -134,7 +134,7 @@ def _idempotency_lines(view: RepoView, paths: set[str]) -> list[str]:
 def _orders_constraint_lines(view: RepoView) -> list[str]:
     found: list[str] = []
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         text = comments_blanked(source)
         for match in _ORDERS_CONSTRAINT.finditer(text):
@@ -184,7 +184,7 @@ def check_21(view: RepoView) -> CheckResult:
 def _webhook_files(view: RepoView) -> list[tuple[SourceFile, str]]:
     found: list[tuple[SourceFile, str]] = []
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         if "webhook" in source.path.lower():
             found.append((source, f"{source.path}:1"))

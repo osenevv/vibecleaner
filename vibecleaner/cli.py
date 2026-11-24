@@ -46,14 +46,14 @@ def main(argv: list[str] | None = None) -> int:
 _KNOWN_COMMANDS = frozenset(
     {"scan", "start", "fix", "run", "init", "deslop", "preflight", "states", "rule", "version"}
 )
-_START_ALIASES = frozenset({"start", "fix", "run"})
+_START_ALIASES = frozenset({"start", "run"})
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return ["scan"]
     first = argv[0]
-    if first in {"fix", "run"}:
+    if first == "run":
         return ["start", *argv[1:]]
     if first in _KNOWN_COMMANDS or first in {"-h", "--help"}:
         return argv

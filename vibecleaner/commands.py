@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from vibecleaner.cleanup import FixReport, fix_tree, revert_rule
 from vibecleaner.collector import CollectorError, collect
 from vibecleaner.deslop import CONCERN_BRIEFS, DESLOP_CONCERNS, slop_score
 from vibecleaner.deterministic import run_deterministic
@@ -26,7 +27,7 @@ from vibecleaner.project_rules import (
     load_project_rules,
     rule_hits_preview,
 )
-from vibecleaner.reporter import markdown_cell
+from vibecleaner.reporter import markdown_cell, write_rows_sarif
 
 _FAIL_CHOICES = ("critical", "high", "medium", "low", "none")
 _FAMILY_LANES = {"D8": "defensive-code"}
@@ -42,6 +43,13 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
     init.add_argument("--ci", action="store_true", help="install .github/workflows/vibecleaner.yml")
     init.add_argument("--force", action="store_true", help="overwrite existing managed hooks or rule files")
     init.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
+
+    fix = sub.add_parser("fix", help="delete proven slop, then ask the host to finish the rest")
+    fix.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
+    fix.add_argument("--no-host", action="store_true", help="apply only edits a detector can prove")
+    fix.add_argument("--revert", default=None, metavar="RULE", help="undo one rule and re-apply the others")
+    fix.add_argument("--sarif", default=None, metavar="PATH", help="write remaining findings as SARIF 2.1.0")
+    fix.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
 
     deslop = sub.add_parser("deslop", help="group slop findings into eight cleanup lanes for narrow agents")
     deslop.add_argument("path", nargs="?", default=".")
@@ -97,7 +105,7 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
 
 def run_subcommand(args: argparse.Namespace) -> int | None:
     """Return an exit code for a command handled here, or None."""
-    handlers = {"init": _init, "deslop": _deslop, "preflight": _preflight, "rule": _rule}
+    handlers = {"init": _init, "fix": _fix, "deslop": _deslop, "preflight": _preflight, "rule": _rule}
     handler = handlers.get(args.command)
     return handler(args) if handler is not None else None
 
@@ -121,6 +129,59 @@ def _init(args: argparse.Namespace) -> int:
     else:
         print(render_init_summary(report))
     return 0
+
+
+def _fix(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve()
+    if args.revert:
+        try:
+            restored = revert_rule(root, args.revert)
+        except (CollectorError, OSError, json.JSONDecodeError) as exc:
+            return _error(exc)
+        print(f"Reverted {args.revert} in {len(restored)} file(s).")
+        for path in restored:
+            print(f"  {path}")
+        return 0
+    try:
+        report = fix_tree(root, use_host=not args.no_host)
+    except (CollectorError, OSError) as exc:
+        return _error(exc)
+    if args.json:
+        json.dump(
+            {
+                "changed": list(report.changed),
+                "remaining": list(report.remaining),
+                "host": report.host,
+                "workers": report.workers,
+                "held": list(report.held),
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    else:
+        print(_fix_text(report))
+    if args.sarif:
+        write_rows_sarif(list(report.remaining), args.sarif)
+    return 0 if report.clean else 1
+
+
+def _fix_text(report: FixReport) -> str:
+    lines = [f"Changed {len(report.changed)} file(s) on {report.workers} thread(s). Host: {report.host}."]
+    for path in report.changed:
+        lines.append(f"  {path}")
+    if report.remaining:
+        lines.append(f"Still residue: {len(report.remaining)}.")
+        for item in report.remaining:
+            lines.append(f"  {item}")
+    else:
+        lines.append("No slop residue remains.")
+    if report.held:
+        lines.append("Left for a person:")
+        lines.extend(f"  {item}" for item in report.held)
+    if report.host == "no host" and report.remaining:
+        lines.append("Set VIBECLEANER_HOST to claude-code, codex, or antigravity to clean what is left.")
+    return "\n".join(lines)
 
 
 def _deslop(args: argparse.Namespace) -> int:

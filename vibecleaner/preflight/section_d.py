@@ -25,7 +25,8 @@ from vibecleaner.preflight.patterns import (
 )
 from vibecleaner.preflight.results import CheckResult, Status, _evidence, _make, _uniq
 from vibecleaner.preflight.signals import _accounts, _database, _has_ui, _http
-from vibecleaner.preflight.view import RepoView, _is_comment, _is_prose_path, _is_test_path
+from vibecleaner.preflight.code_text import is_prose_path
+from vibecleaner.preflight.view import RepoView, _is_comment, _is_test_path
 
 _DISK_SKIP = frozenset({"node_modules", ".git", ".venv", "dist", "build"})
 _DISK_LIMIT = 4000
@@ -59,7 +60,7 @@ def check_25(view: RepoView) -> CheckResult:
     unsafe: list[str] = []
     safe: list[str] = []
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         if not is_blankable(source) and not is_sql_path(source.path):
             continue
@@ -231,7 +232,7 @@ def _page_locs(path: str, text: str) -> tuple[str, ...]:
 def _list_files(view: RepoView) -> list[_ListFile]:
     files: list[_ListFile] = []
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         text = comments_blanked(source)
         hits = _select_lists(text) + _orm_lists(text)
@@ -252,7 +253,7 @@ def _list_files(view: RepoView) -> list[_ListFile]:
 def _index_map(view: RepoView) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     for source in view.files:
-        if _is_test_path(source.path) or _is_prose_path(source.path):
+        if _is_test_path(source.path) or is_prose_path(source.path):
             continue
         text = comments_blanked(source)
         for match in _INDEX_ON.finditer(text):
@@ -404,7 +405,29 @@ def check_28(view: RepoView) -> CheckResult:
     )
 
 
+_DESTRUCTIVE_SQL = re.compile(
+    r"\bDROP\s+(?:COLUMN|TABLE)\b|\bTRUNCATE\b|\bALTER\s+COLUMN\b[^;\n]*\bTYPE\b",
+    re.I,
+)
+
+
 def check_29(view: RepoView) -> CheckResult:
+    hazards = view.search(
+        _DESTRUCTIVE_SQL,
+        skip_tests=True,
+        suffixes=frozenset({".sql"}),
+        limit=5,
+    )
+    if hazards:
+        return _make(
+            29,
+            Status.WARNING,
+            "A migration drops, truncates, or retypes a column. Rollback was not rehearsed.",
+            _evidence(hazards, "not run"),
+            "Rolling back the app or the migration can drop rows or fail to boot.",
+            "Deploy the previous version against a copy of the new schema, or run the down migration on a copy. Success: the old version still serves traffic and user data is still there.",
+            hazards,
+        )
     downs = _uniq(
         view.search_usage(_DOWN_MIGRATION, skip_tests=True, limit=5)
         + view.search(_DOWN_MIGRATION, skip_tests=True, skip_comments=False, suffixes=frozenset({".sql"}), limit=5)

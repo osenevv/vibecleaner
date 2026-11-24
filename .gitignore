@@ -8,3 +8,5 @@ dist/
 VIBECLEANER_DESLOP.md
 VIBECLEANER_STATES.md
 VIBECLEANER_RUN.md
+.vibecleaner/checkpoint.json
+.vibecleaner/origin.json
