@@ -53,6 +53,7 @@ _MAPPED = (
     "D6a.layering_violation",
     "D6b.hardcoded_mock_stub",
     "D6c.llm_prose",
+    "D9.expired_ttl",
 )
 
 

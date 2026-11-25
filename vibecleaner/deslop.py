@@ -63,6 +63,7 @@ DESLOP_CONCERNS: dict[str, str] = {
     "D9.boundary_schema": "defensive-code",
     "D9.graphql_drift": "ai-slop",
     "D9.registry_missing": "legacy",
+    "D9.expired_ttl": "legacy",
     "D6a.silent_exception": "defensive-code",
     "D6a.deprecated_sdk": "legacy",
     "D6a.passthrough_wrapper": "dedupe",

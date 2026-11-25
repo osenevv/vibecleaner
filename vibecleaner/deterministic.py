@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import date
 import math
 import re
 from collections import Counter
@@ -11,6 +12,7 @@ from pathlib import PurePosixPath
 
 from tree_sitter import Node
 
+from vibecleaner.collector import _is_test_unit_path
 from vibecleaner.models import Finding, Language, ScanContext, SourceFile
 from vibecleaner.deslop import build_cross_refs, detect_deslop, detect_repo_deslop
 from vibecleaner.imports import missing_imports
@@ -242,6 +244,7 @@ def run_deterministic(ctx: ScanContext) -> list[Finding]:
         findings.extend(detect_prose_tics(source))
         findings.extend(detect_state_bugs(source))
         findings.extend(detect_deslop(source, cross_refs=cross_refs))
+        findings.extend(detect_expired_ttls(source))
     # RLS is decided across the whole migration set: a later file may enable it.
     findings.extend(detect_supabase_rls_all(ctx.files))
     findings.extend(detect_repo_deslop(ctx.files))
@@ -249,6 +252,46 @@ def run_deterministic(ctx: ScanContext) -> list[Finding]:
     findings.extend(missing_imports(ctx.root, ctx.files))
     findings.extend(production_findings(ctx.root, ctx.files))
     return suppress(ctx.files, _dedupe(findings))
+
+
+_TTL_RE = re.compile(
+    r"(?:#|//|/\*|--)\s*@?vibecleaner-ttl\s*[:=]\s*(\d{4}-\d{2}-\d{2})(?:\s*(.*))?",
+    re.IGNORECASE,
+)
+_TTL_DOC_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".txt"})
+
+
+def detect_expired_ttls(source: SourceFile, *, today: date | None = None) -> list[Finding]:
+    """Flag temporary AI shims whose ``vibecleaner-ttl: YYYY-MM-DD`` date has passed."""
+    if source.language is Language.ENV or _is_test_unit_path(source.path):
+        return []
+    if PurePosixPath(source.path).suffix.lower() in _TTL_DOC_SUFFIXES:
+        return []
+    current_day = today or date.today()
+    findings: list[Finding] = []
+    for lineno, line in enumerate(source.text.splitlines(), start=1):
+        match = _TTL_RE.search(line)
+        if match is None:
+            continue
+        raw_date = match.group(1)
+        try:
+            expiry = date.fromisoformat(raw_date)
+        except ValueError:
+            continue
+        if expiry >= current_day:
+            continue
+        reason = (match.group(2) or "").strip().rstrip("*/").strip()
+        suffix = f" ({reason})" if reason else ""
+        findings.append(
+            Finding(
+                rule_id="D9.expired_ttl",
+                file=source.path,
+                line=lineno,
+                message=f"Temporary shim expired on {raw_date}{suffix}; remove it or promote to owned architecture",
+                snippet=line.strip()[:200],
+            )
+        )
+    return findings
 
 
 def detect_secrets(f: SourceFile) -> list[Finding]:

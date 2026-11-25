@@ -23,6 +23,7 @@ from vibecleaner.fix_contract import (
     Team,
     Verdict,
 )
+from vibecleaner.flows import FlowsError, load_flows, run_flows, to_check_result
 from vibecleaner.jury.panel import run_panel
 from vibecleaner.jury.scan_nodes import ScanLedger, run_static
 from vibecleaner.repair.workspace import (
@@ -155,6 +156,9 @@ def _check(ctx: FixContext, team: Team) -> RunResult:
     runtime = runtime_check(ctx, ctx.root)
     if runtime.verdict is Verdict.REVISE:
         return _attempt_fix(ctx, team, runtime, "The runtime check failed.")
+    flow_gate = _run_flow_gate(ctx.root)
+    if flow_gate.verdict is Verdict.REVISE:
+        return _attempt_fix(ctx, team, flow_gate, "A critical money-path flow failed.")
     blocked, applied = apply_interface(ctx)
     if blocked is not None:
         return blocked
@@ -217,8 +221,13 @@ def _attempt_fix(ctx: FixContext, team: Team, failure: CheckResult, summary: str
             )
             re_static = run_static(wt_ctx, ScanLedger())
             re_gates = run_gates(wt_ctx, worktree)
-            if re_static.verdict is Verdict.REVISE or re_gates.verdict is Verdict.REVISE:
-                still = re_static if re_static.verdict is Verdict.REVISE else re_gates
+            re_flows = _run_flow_gate(worktree)
+            if re_static.verdict is Verdict.REVISE or re_gates.verdict is Verdict.REVISE or re_flows.verdict is Verdict.REVISE:
+                still = (
+                    re_static
+                    if re_static.verdict is Verdict.REVISE
+                    else (re_gates if re_gates.verdict is Verdict.REVISE else re_flows)
+                )
                 sig = (tuple(item.summary for item in still.evidence), diff_hash)
                 _cleanup_branch(ctx.root, worktree, branch)
                 if sig in seen_states:
@@ -258,6 +267,30 @@ def _attempt_fix(ctx: FixContext, team: Team, failure: CheckResult, summary: str
 def _cleanup_branch(root: Path, worktree: Path, branch: str) -> None:
     remove_worktree(root, worktree)
     git(root, "branch", "-D", branch, check=False)
+
+
+def _run_flow_gate(root: Path) -> CheckResult:
+    try:
+        specs = load_flows(root)
+    except FlowsError as exc:
+        from vibecleaner.fix_contract import Evidence, EvidenceKind
+
+        return CheckResult(
+            "flows",
+            Verdict.REVISE,
+            evidence=(
+                Evidence(
+                    EvidenceKind.BUILD_ERROR,
+                    f"invalid flows.json: {exc}",
+                    file=".vibecleaner/flows.json",
+                    command=("vibecleaner", "flows"),
+                    output=str(exc),
+                ),
+            ),
+        )
+    if not specs:
+        return CheckResult("flows", Verdict.PASS)
+    return to_check_result(run_flows(root, specs))
 
 
 def _fix_prompt(failure: CheckResult, spec: str | None) -> str:

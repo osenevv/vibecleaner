@@ -245,6 +245,10 @@ RULES: dict[str, RuleSpec] = {
             "Confirm the name on PyPI or npm. A 404 is a guess, a private registry, or a slopsquat.",
         ),
         RuleSpec(
+            "D9.expired_ttl", "D9", "Expired temporary shim (vibecleaner-ttl)", Category.SLOP, Severity.HIGH, 1,
+            "Remove the expired temporary shim or promote it to permanent, tested architecture and delete the TTL marker.",
+        ),
+        RuleSpec(
             "D3.missing_auth", "D3", "Missing authentication on mutating route", Category.SECURITY, Severity.CRITICAL, 2,
             "Require an authenticated session (route dependency, middleware matcher, or explicit session check) before the mutation.",
             question=(

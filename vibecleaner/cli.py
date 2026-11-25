@@ -12,6 +12,13 @@ from pathlib import Path
 from rich.console import Console
 
 from vibecleaner import __version__
+from vibecleaner.baseline import (
+    DEFAULT_BASELINE_REL,
+    BaselineError,
+    compare_baseline,
+    load_baseline,
+    save_baseline,
+)
 from vibecleaner.collector import CollectorError
 from vibecleaner.commands import add_subcommands, fails_on, run_subcommand
 from vibecleaner.decision_judge import DecisionAPIError
@@ -20,7 +27,7 @@ from vibecleaner.models import DEFAULT_THRESHOLD
 from vibecleaner.pipeline import run_scan
 from vibecleaner.project_rules import ProjectRulesError
 from vibecleaner.prompt_fix import build_fix_prompt, copy_to_clipboard, run_agent_fix
-from vibecleaner.reporter import render_terminal, to_json, write_markdown, write_sarif
+from vibecleaner.reporter import compute_scores, render_terminal, to_json, write_markdown, write_sarif
 from vibecleaner.states import detect_state_bugs, extract_machines, render_states
 from vibecleaner.verify.tamper import check_tamper, snapshot
 
@@ -44,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 _KNOWN_COMMANDS = frozenset(
-    {"scan", "start", "fix", "run", "init", "deslop", "preflight", "states", "tests", "doctor", "rule", "version"}
+    {"scan", "start", "fix", "run", "init", "deslop", "preflight", "states", "tests", "doctor", "triage", "flows", "rule", "version"}
 )
 _START_ALIASES = frozenset({"start", "run"})
 
@@ -127,8 +134,30 @@ def _main(argv: list[str]) -> int:
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if args.save_baseline is not None:
+        baseline_dest = Path(args.save_baseline) if args.save_baseline else root / DEFAULT_BASELINE_REL
+        try:
+            saved = save_baseline(result, baseline_dest)
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if not args.json and not args.prompt:
+            sec_s, slop_s = compute_scores(result.findings)
+            print(f"Saved baseline to {saved} (security={sec_s}, slop={slop_s}, findings={len(result.findings)}).", file=sys.stderr)
+    baseline_diff = None
+    if args.baseline is not None:
+        baseline_src = Path(args.baseline) if args.baseline else root / DEFAULT_BASELINE_REL
+        try:
+            baseline_snap = load_baseline(baseline_src)
+        except BaselineError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        baseline_diff = compare_baseline(result, baseline_snap, fail_on=args.fail_on)
     if args.json:
-        json.dump(to_json(result), sys.stdout, indent=2)
+        payload = to_json(result)
+        if baseline_diff is not None:
+            payload["baseline"] = baseline_diff.to_dict()
+        json.dump(payload, sys.stdout, indent=2)
         sys.stdout.write("\n")
     elif args.prompt:
         prompt = build_fix_prompt(result, fail_on=args.fail_on)
@@ -136,6 +165,13 @@ def _main(argv: list[str]) -> int:
             print(prompt)
     else:
         render_terminal(result, Console(highlight=False, soft_wrap=args.quiet), quiet=args.quiet)
+        if baseline_diff is not None:
+            status = "REGRESSED" if baseline_diff.regressed else "OK"
+            print(
+                f"Baseline ratchet: {status} "
+                f"(new={len(baseline_diff.new_findings)}, resolved={baseline_diff.resolved_count}, "
+                f"security={baseline_diff.security_delta:+d}, slop={baseline_diff.slop_delta:+d})"
+            )
     if args.copy and result.findings:
         prompt = build_fix_prompt(result, fail_on=args.fail_on)
         copied, info = copy_to_clipboard(prompt)
@@ -145,6 +181,8 @@ def _main(argv: list[str]) -> int:
             print(f"warning: could not copy fix prompt ({info})", file=sys.stderr)
     if result.judge.errors:
         return 2
+    if baseline_diff is not None:
+        return 1 if baseline_diff.regressed else 0
     if fails_on(result.findings, args.fail_on):
         return 1
     return 0
@@ -244,6 +282,22 @@ def _build_parser() -> _Parser:
         default=1,
         metavar="N",
         help="maximum --autofix agent + re-scan rounds (1..5, default: 1)",
+    )
+    scan.add_argument(
+        "--save-baseline",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help="save scan baseline snapshot (default: .vibecleaner/baseline.json)",
+    )
+    scan.add_argument(
+        "--baseline",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help="ratchet gate: fail only on new findings or score drops vs baseline",
     )
     states = sub.add_parser("states", help="write state machines and confirmed invalid transitions")
     states.add_argument("path", nargs="?", default=".", help="repository root (default: .)")

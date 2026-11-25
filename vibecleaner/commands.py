@@ -13,6 +13,7 @@ from vibecleaner.deslop import CONCERN_BRIEFS, DESLOP_CONCERNS, slop_score
 from vibecleaner.deterministic import run_deterministic
 from vibecleaner.doctor import render_doctor_text, run_doctor
 from vibecleaner.fix_contract import Verdict
+from vibecleaner.flows import FlowsError, load_flows, run_flows
 from vibecleaner.init_cmd import render_init_summary, run_init
 from vibecleaner.models import PROJECT_RULE_PREFIX, Category, Finding, Severity
 from vibecleaner.preflight import Status, preflight_to_json, render_preflight_markdown, run_preflight
@@ -37,6 +38,7 @@ from vibecleaner.test_coverage import (
     generate_missing_tests,
     render_coverage_markdown,
 )
+from vibecleaner.triage import generate_codeowners, render_triage_markdown, run_triage
 from vibecleaner.verify.tamper import check_tamper, snapshot
 
 _FAIL_CHOICES = ("critical", "high", "medium", "low", "none")
@@ -103,6 +105,20 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
     doctor.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
     doctor.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
 
+    triage = sub.add_parser("triage", help="classify modules as Keep / Fix / Rebuild and optionally generate CODEOWNERS")
+    triage.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
+    triage.add_argument("--days", type=int, default=90, metavar="N", help="git churn lookback window in days (default: 90)")
+    triage.add_argument("--out", default=None, metavar="PATH", help="markdown path (default: <root>/VIBECLEANER_TRIAGE.md)")
+    triage.add_argument("--no-report", action="store_true", help="do not write VIBECLEANER_TRIAGE.md")
+    triage.add_argument("--write-codeowners", default=None, metavar="OWNER", help="write .github/CODEOWNERS for high-risk paths")
+    triage.add_argument("--codeowners-out", default=None, metavar="PATH", help="custom CODEOWNERS output path")
+    triage.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
+
+    flows = sub.add_parser("flows", help="run money-path / critical-flow verification specs (.vibecleaner/flows.json)")
+    flows.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
+    flows.add_argument("--file", dest="flows_file", default=None, metavar="PATH", help="custom flows.json path")
+    flows.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
+
     rule = sub.add_parser("rule", help="turn a correction into a project rule in .vibecleaner/rules.json")
     actions = rule.add_subparsers(dest="rule_command", required=True)
     pattern = actions.add_parser("add-pattern", help="ban a construct with a regex")
@@ -147,6 +163,8 @@ def run_subcommand(args: argparse.Namespace) -> int | None:
         "preflight": _preflight,
         "tests": _tests,
         "doctor": _doctor,
+        "triage": _triage,
+        "flows": _flows,
         "rule": _rule,
     }
     handler = handlers.get(args.command)
@@ -606,3 +624,71 @@ def _doctor(args: argparse.Namespace) -> int:
     else:
         print(render_doctor_text(report))
     return 1 if report.has_errors else 0
+
+
+def _triage(args: argparse.Namespace) -> int:
+    if args.days < 1:
+        return _error(ValueError("--days must be at least 1"))
+    root = Path(args.path).expanduser().resolve()
+    try:
+        report = run_triage(root, days=args.days)
+    except (CollectorError, OSError) as exc:
+        return _error(exc)
+    codeowners_path: Path | None = None
+    if args.write_codeowners is not None:
+        try:
+            text = generate_codeowners(report, args.write_codeowners)
+            codeowners_path = Path(args.codeowners_out) if args.codeowners_out else root / ".github" / "CODEOWNERS"
+            codeowners_path.parent.mkdir(parents=True, exist_ok=True)
+            codeowners_path.write_text(text, encoding="utf-8")
+        except (ValueError, OSError) as exc:
+            return _error(exc)
+    destination: Path | None = None
+    if not args.no_report and not args.json:
+        destination = Path(args.out) if args.out else root / "VIBECLEANER_TRIAGE.md"
+        try:
+            destination.write_text(render_triage_markdown(report), encoding="utf-8")
+        except OSError as exc:
+            return _error(exc)
+    if args.json:
+        payload = report.to_dict()
+        if codeowners_path is not None:
+            payload["codeowners_path"] = str(codeowners_path)
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        counts = report.counts
+        extra = f" (wrote {destination})" if destination is not None else ""
+        print(
+            f"Triage: rebuild={counts['rebuild']}, fix={counts['fix']}, keep={counts['keep']}, "
+            f"high_risk={len(report.high_risk_paths)}{extra}"
+        )
+        if codeowners_path is not None:
+            print(f"Wrote CODEOWNERS to {codeowners_path}")
+    return 0
+
+
+def _flows(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve()
+    custom = Path(args.flows_file) if args.flows_file else None
+    try:
+        specs = load_flows(root, custom)
+    except FlowsError as exc:
+        return _error(exc)
+    if not specs:
+        if args.json:
+            json.dump({"root": str(root), "ok": True, "passed": 0, "failed": 0, "results": []}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print("No flows configured (.vibecleaner/flows.json not found).")
+        return 0
+    report = run_flows(root, specs)
+    if args.json:
+        json.dump(report.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        for item in report.results:
+            tag = "PASS" if item.ok else "FAIL"
+            print(f"[{tag}] {item.name} ({item.kind}, {item.duration_s:.2f}s): {item.detail}")
+        print(f"Flows: {report.passed}/{len(report.results)} passed")
+    return 0 if report.ok else 1

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -72,7 +74,11 @@ def fetch(
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
-    opener = urllib.request.build_opener(_LoopbackRedirect() if local else urllib.request.HTTPRedirectHandler())
+    handlers: list[urllib.request.BaseHandler] = [
+        _LoopbackRedirect() if local else urllib.request.HTTPRedirectHandler(),
+        _https_handler(),
+    ]
+    opener = urllib.request.build_opener(*handlers)
     try:
         with opener.open(request, timeout=timeout_s) as response:
             return response.status, response.read()
@@ -91,6 +97,21 @@ def decode_json(body: bytes, *, what: str) -> object:
         return json.loads(body.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ProviderError(f"{what} returned non-JSON: {exc}") from exc
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return an SSLContext that uses certifi on macOS/bundled Pythons when no env CA is set."""
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return ssl.create_default_context()
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _https_handler() -> urllib.request.HTTPSHandler:
+    return urllib.request.HTTPSHandler(context=_ssl_context())
 
 
 class _LoopbackRedirect(urllib.request.HTTPRedirectHandler):

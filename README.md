@@ -64,6 +64,10 @@ vibecleaner preflight .                     # 42 read-only launch checks (VIBECL
 vibecleaner states .                        # state machines and stuck transitions (VIBECLEANER_STATES.md)
 vibecleaner tests . --run-coverage          # audit test coverage & quality (VIBECLEANER_TESTS.md)
 vibecleaner tests . --generate --min-score 80  # generate & verify missing test suites on any app
+vibecleaner triage . --write-codeowners @team  # Keep/Fix/Rebuild triage + high-risk CODEOWNERS
+vibecleaner flows .                         # run money-path specs (.vibecleaner/flows.json)
+vibecleaner scan . --save-baseline          # save ratchet baseline (.vibecleaner/baseline.json)
+vibecleaner scan . --baseline               # fail only on regressions vs baseline
 vibecleaner doctor .                        # check Python, Git, Docker, API keys, agent CLIs, and repo config
 vibecleaner rule list                       # list project rules from .vibecleaner/rules.json
 vibecleaner rule add-pattern ID --pattern 'REGEX' --message 'MSG' --lane ai-slop --preview
