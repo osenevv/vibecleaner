@@ -349,3 +349,14 @@ def test_two_repos_do_not_leak_project_rules_into_sarif(tmp_path: Path) -> None:
     assert "P.beta-quiet" not in rules_a2
     assert "P.beta-rule" not in RULES
     assert "P.alpha-rule" in RULES
+
+
+def test_preflight_and_deslop_no_report(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / "app.py").write_text("def ok():\n    return 1\n", encoding="utf-8")
+    assert main(["deslop", str(tmp_path), "--no-report", "--fail-on", "none"]) == 0
+    assert "deslop:" in capsys.readouterr().out
+    assert not (tmp_path / "VIBECLEANER_DESLOP.md").exists()
+
+    assert main(["preflight", str(tmp_path), "--no-report"]) == 0
+    assert "preflight:" in capsys.readouterr().out
+    assert not (tmp_path / "VIBECLEANER_PREFLIGHT.md").exists()

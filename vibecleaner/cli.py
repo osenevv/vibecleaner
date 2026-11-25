@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 _KNOWN_COMMANDS = frozenset(
-    {"scan", "start", "fix", "run", "init", "deslop", "preflight", "states", "rule", "version"}
+    {"scan", "start", "fix", "run", "init", "deslop", "preflight", "states", "tests", "rule", "version"}
 )
 _START_ALIASES = frozenset({"start", "run"})
 

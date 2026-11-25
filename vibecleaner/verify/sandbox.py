@@ -20,6 +20,7 @@ _NODE_IMAGE = "node:22-slim"
 _GO_IMAGE = "golang:1.22-alpine"
 _RUST_IMAGE = "rust:1.80-slim"
 _JVM_IMAGE = "eclipse-temurin:21-jdk"
+_DOTNET_IMAGE = "mcr.microsoft.com/dotnet/sdk:8.0"
 _DOCKERFILE = (
     "FROM python:3.12-slim\n"
     "COPY --from=node:22-slim /usr/local/bin/node /usr/local/bin/node\n"
@@ -68,6 +69,8 @@ def choose_image(root: Path) -> str:
         return _RUST_IMAGE
     if "jvm" in runtimes:
         return _JVM_IMAGE
+    if "csharp" in runtimes:
+        return _DOTNET_IMAGE
     if "node" in runtimes:
         return _NODE_IMAGE
     return _PY_IMAGE

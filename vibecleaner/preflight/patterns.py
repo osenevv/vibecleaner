@@ -19,10 +19,12 @@ _LOCKFILES = frozenset(
         "Cargo.lock",
         "composer.lock",
         "Gemfile.lock",
+        "packages.lock.json",
     }
 )
 _NPM_MANIFESTS = frozenset({"package.json"})
 _PY_MANIFESTS = frozenset({"pyproject.toml", "requirements.txt", "Pipfile", "setup.py", "setup.cfg"})
+_DOTNET_MANIFEST_SUFFIXES = frozenset({".csproj", ".fsproj", ".vbproj"})
 _IMAGE_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".svg"})
 _IMAGE_LIMIT = 500 * 1024
 _MARKUP_SUFFIXES = frozenset({".tsx", ".jsx", ".html", ".htm", ".vue"})
@@ -61,12 +63,16 @@ _HTTP = re.compile(
     r"(?i)(?:@(?:\w+\.)?(?:get|post|put|patch|delete|api_route)\s*\(|"
     r"\b(?:app|router)\.(?:get|post|put|patch|delete)\s*\(|"
     r"export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|PATCH|DELETE)\b|"
-    r"\bFastAPI\s*\(|\bAPIRouter\s*\(|\bexpress\s*\()"
+    r"\bFastAPI\s*\(|\bAPIRouter\s*\(|\bexpress\s*\(|"
+    r"\.Map(?:Get|Post|Put|Patch|Delete)\s*\(|"
+    r"\[Http(?:Get|Post|Put|Patch|Delete)\b|"
+    r"\bWebApplication\.CreateBuilder\s*\()"
 )
 _DB = re.compile(
     r"(?i)(?:\bpsycopg\b|\basyncpg\b|\bsqlalchemy\b|\bprisma\b|\bsupabase\b|\bSUPABASE_|"
     r"\bmongodb\b|\bmongoose\b|CREATE\s+TABLE|\bpostgres\b|\bmysql\b|\bsqlite\b|"
-    r"from\s+['\"]pg['\"]|\bDATABASE_URL\b)"
+    r"from\s+['\"]pg['\"]|\bDATABASE_URL\b|"
+    r"\bDbContext\b|\bUseSqlite\b|\bUseNpgsql\b|\bUseSqlServer\b|\bSqliteConnection\b)"
 )
 _ACCOUNTS = re.compile(
     r"(?i)(?:\bget_current_user\b|\bsupabase\.auth\b|\bauth\.users\b|\bNextAuth\b|"
@@ -189,7 +195,7 @@ _NAIVE_SQL = re.compile(r"(?i)\btimestamp\b(?!\s+with\s+time\s+zone)")
 _DOWN_MIGRATION = re.compile(
     r"(?im)(?:^\s*def\s+downgrade\b|^\s*def\s+down\b|\bmigrate:down\b|--\s*\+goose\s+Down\b)"
 )
-_CI_TEST = re.compile(r"(?i)\b(?:pytest|npm test|pnpm test|yarn test|vitest|jest|cargo test)\b")
+_CI_TEST = re.compile(r"(?i)\b(?:pytest|npm test|pnpm test|yarn test|vitest|jest|cargo test|dotnet test)\b")
 _LEGAL_STEMS = ("privacy", "terms", "cookie-policy", "cookies-policy", "imprint", "impressum", "legal-notice")
 _LEGAL_ROUTE = re.compile(
     r"(?i)['\"]/(privacy|terms|cookie-policy|cookies|imprint|impressum|legal|returns|refund-policy)(?:/|['\"])"
@@ -293,6 +299,7 @@ _STACK_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Next.js", re.compile(r"next/server|next/navigation|next/font|NextRequest|next\.config")),
     ("FastAPI", re.compile(r"\bFastAPI\b|\bfrom fastapi\b|\bimport fastapi\b")),
     ("Express", re.compile(r"from ['\"]express['\"]|require\(['\"]express['\"]\)|\bexpress\s*\(")),
+    ("C# / .NET", re.compile(r"\.csproj\b|\.sln\b|\bMicrosoft\.AspNetCore\b|\bnamespace\s+[A-Z][\w.]*\s*[;{]|\busing\s+System\b")),
     ("Supabase", re.compile(r"supabase|SUPABASE_", re.IGNORECASE)),
     ("Stripe", re.compile(r"\bstripe\b|@stripe/|STRIPE_|loadStripe|api\.stripe\.com", re.IGNORECASE)),
     ("Prisma", re.compile(r"@prisma/client|\bprisma\b", re.IGNORECASE)),

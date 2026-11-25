@@ -117,6 +117,19 @@ def _render_full(result: ScanResult, console: Console) -> None:
         f"units judged: {judge.units_judged}  "
         f"cache hits: {judge.cache_hits}"
     )
+    if result.unsupported_code_files:
+        total_unsupported = sum(result.unsupported_code_files.values())
+        breakdown = ", ".join(f"{ext}: {count}" for ext, count in result.unsupported_code_files.items())
+        if result.supported_code_files == 0:
+            console.print(
+                f"[bold yellow]coverage warning[/bold yellow]: {total_unsupported} code file(s) in "
+                f"unsupported language(s) ({breakdown}) were not analyzed by AST/semantic detectors."
+            )
+        else:
+            console.print(
+                f"note: {total_unsupported} unsupported code file(s) ({breakdown}) were not analyzed by AST/semantic detectors.",
+                markup=False,
+            )
     console.print(f"input tokens: {judge.input_tokens}  estimated cost: ${cost:.6f} ($0.10/1M)")
     if result.review is not None:
         console.print(f"review tier {result.review.tier}: {result.review.reason}", markup=False)
@@ -142,6 +155,8 @@ def _render_full(result: ScanResult, console: Console) -> None:
             console.print()
             console.print("[bold]Copy and paste this into your AI coding agent (or run `vibecleaner --autofix`):[/bold]")
             console.print(prompt, markup=False)
+    elif result.unsupported_code_files and result.supported_code_files == 0:
+        console.print("[bold yellow]PARTIAL[/bold yellow] no findings in supported files (unsupported stack not analyzed)")
     else:
         console.print("[bold green]PASS[/bold green] no findings")
     skipped = judge.units_skipped_layer1
@@ -425,6 +440,10 @@ def to_json(result: ScanResult) -> dict[str, object]:
         "security_score": security,
         "slop_score": slop,
         "files_scanned": result.files_scanned,
+        "coverage": {
+            "supported_code_files": result.supported_code_files,
+            "unsupported_code_files": dict(result.unsupported_code_files),
+        },
         "duration_s": result.duration_s,
         "judge": {
             "mode": judge.mode,

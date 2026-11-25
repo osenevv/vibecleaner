@@ -34,6 +34,7 @@ class Language(str, Enum):
     TYPESCRIPT = "typescript"
     TSX = "tsx"
     JAVASCRIPT = "javascript"
+    CSHARP = "csharp"
     SQL = "sql"
     ENV = "env"
     OTHER = "other"
@@ -485,3 +486,5 @@ class ScanResult:
     diff_base: str | None = None
     review: ReviewRouting | None = None
     project_rule_specs: tuple[RuleSpec, ...] = ()
+    supported_code_files: int = 0
+    unsupported_code_files: dict[str, int] = field(default_factory=dict)

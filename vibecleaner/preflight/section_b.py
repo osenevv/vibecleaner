@@ -28,6 +28,7 @@ from vibecleaner.preflight.patterns import (
     _FORM_POST,
     _HOSTED_AUTH,
     _LOCALHOST,
+    _DOTNET_MANIFEST_SUFFIXES,
     _LOCKFILES,
     _LOGGED_SECRET,
     _LOG_CALL,
@@ -347,11 +348,16 @@ def check_11(view: RepoView) -> CheckResult:
     locks = view.named(_LOCKFILES)
     npm = view.named(_NPM_MANIFESTS)
     pip = view.named(_PY_MANIFESTS)
-    if not npm and not pip:
+    dotnet = [
+        source.path
+        for source in view.files
+        if PurePosixPath(source.path).suffix.lower() in _DOTNET_MANIFEST_SUFFIXES
+    ]
+    if not npm and not pip and not dotnet:
         return _make(
             11,
             Status.NOT_APPLICABLE,
-            "No package.json, pyproject.toml, requirements.txt, or Pipfile was found, so there is no dependency manifest to audit.",
+            "No package.json, pyproject.toml, requirements.txt, Pipfile, or .csproj was found, so there is no dependency manifest to audit.",
             "reason: no dependency manifest",
             "There is no declared dependency set for a known vulnerability to hide in.",
         )
@@ -360,6 +366,8 @@ def check_11(view: RepoView) -> CheckResult:
         commands.append("`npm audit --omit=dev`")
     if pip:
         commands.append("`pip-audit`")
+    if dotnet:
+        commands.append("`dotnet list package --vulnerable`")
     command_text = " and ".join(commands)
     if locks:
         return _make(

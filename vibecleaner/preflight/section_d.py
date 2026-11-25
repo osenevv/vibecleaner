@@ -490,7 +490,7 @@ def _disk_tests(root: Path) -> tuple[list[str], list[str]]:
         dirnames[:] = [name for name in dirnames if name not in _DISK_SKIP]
         base = Path(dirpath)
         for dirname in dirnames:
-            if dirname in _TEST_DIRS:
+            if dirname in _TEST_DIRS or dirname.lower().endswith((".tests", ".test")):
                 tests.append((base / dirname).relative_to(root).as_posix())
         for name in filenames:
             seen += 1
@@ -507,7 +507,7 @@ def _disk_tests(root: Path) -> tuple[list[str], list[str]]:
 
 
 def _test_anchor(paths: list[str]) -> str:
-    preferred = {".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+    preferred = {".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs"}
     for path in paths:
         if PurePosixPath(path).suffix.lower() in preferred:
             return path
@@ -568,7 +568,7 @@ def check_30(view: RepoView) -> CheckResult:
         return _make(
             30,
             Status.WARNING,
-            "Test files are present and no CI workflow that runs pytest, npm test, vitest, or jest was found.",
+            "Test files are present and no CI workflow that runs pytest, npm test, vitest, jest, or dotnet test was found.",
             _evidence(loc, "not run"),
             "A broken main flow can deploy because nothing runs the tests first.",
             "Add a CI job that runs the suite before deploy. Success: a failing test blocks the release.",

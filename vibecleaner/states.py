@@ -358,6 +358,8 @@ def _unbounded_retries(source: SourceFile, fn: Node) -> list[Finding]:
             continue
         if not _contains_type(node, "try_statement"):
             continue
+        if _has_pre_try_exit(node):
+            continue
         handler = "except_clause" if source.language == Language.PYTHON else "catch_clause"
         if _except_can_exit(node, handler):
             continue
@@ -409,14 +411,46 @@ def _is_enum(node: Node) -> bool:
 
 
 def _is_bounded_retry(node: Node) -> bool:
-    """A for-range loop whose body handles an exception: a bounded retry."""
+    """A for-range loop whose try body exits on success (return/break) and handles failure."""
     if not _contains_type(node, "try_statement"):
         return False
     right = node.child_by_field_name("right")
     if right is None or right.type != "call":
         return False
     fn = right.child_by_field_name("function")
-    return fn is not None and node_text(fn) == "range"
+    if fn is None or node_text(fn) != "range":
+        return False
+    return _try_body_exits_on_success(node)
+
+
+def _try_body_exits_on_success(loop: Node) -> bool:
+    """Return True if an outermost try-statement body in ``loop`` can exit the loop on success (return/break)."""
+    for try_node in _retry_tries(loop):
+        body = try_node.child_by_field_name("body")
+        if body is not None and _contains_success_exit(body):
+            return True
+    return False
+
+
+def _contains_success_exit(node: Node) -> bool:
+    if node.type in {"return_statement", "break_statement"}:
+        return True
+    if node.type in _NESTED_TYPES:
+        return False
+    return any(_contains_success_exit(child) for child in node.named_children)
+
+
+def _has_pre_try_exit(loop: Node) -> bool:
+    """Return True if a ``while True`` loop has a return/break exit before its try block (e.g. queue sentinel)."""
+    body = loop.child_by_field_name("body")
+    if body is None:
+        return False
+    for stmt in body.named_children:
+        if stmt.type == "try_statement":
+            return False
+        if _contains_success_exit(stmt):
+            return True
+    return False
 
 
 def _for_retry_ends(loop: Node, fn: Node) -> bool:

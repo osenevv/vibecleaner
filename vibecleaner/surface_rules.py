@@ -25,6 +25,7 @@ _TAG = re.compile(r"</(\w+)\s*>|<(\w+)\b([^>]*)>", re.I)
 _CLASS_VALUE = re.compile(r"""class\s*=\s*(['"])(.*?)\1""", re.I)
 _FLOAT = re.compile(r"\b(?:dialog|popover|menu|tooltip|modal|overlay)\b", re.I)
 _POSITION = re.compile(r"position\s*:\s*(?:fixed|absolute|sticky)", re.I)
+_TEMPLATE_EXPR = re.compile(r"\{\{|\{%|<%|\$\{")
 _GRADIENT = ("linear-gradient", "radial-gradient", "repeating-linear-gradient")
 _MOTION_PROPS = frozenset(
     {
@@ -72,25 +73,60 @@ _CHECKS = """<style data-vibecleaner="design">
 """
 
 
+def _safe_strip_box(match: re.Match[str]) -> str:
+    whole = match.group(0)
+    open_end = whole.find(">")
+    close_start = whole.rfind("</")
+    open_tag = whole[: open_end + 1] if open_end >= 0 else whole
+    inner = whole[open_end + 1 : close_start] if open_end >= 0 and close_start > open_end else ""
+    if _TEMPLATE_EXPR.search(whole) or re.search(r"<[a-z]", inner, re.I):
+        return whole
+    if re.search(r"\b(?:id|data-[a-z0-9_-]+|aria-live|role)\s*=", open_tag, re.I):
+        return whole
+    return ""
+
+
+def _has_custom_design_system(css: str) -> bool:
+    """Return True when the document already defines its own CSS custom-property token system."""
+    return len(set(_CUSTOM_PROP_DEF.findall(css))) >= 3
+
+
 def apply_design(text: str, suffix: str) -> str:
     """Apply the design-rules list to one HTML or CSS document."""
     if suffix in {".css", ".scss"}:
-        rewritten = _rewrite_stylesheet(text)
+        custom_system = _has_custom_design_system(text)
+        rewritten = _rewrite_stylesheet(text, preserve_design=custom_system)
         return _ensure_tokens(rewritten)
     if suffix not in {".html", ".htm"}:
         return text
-    text = _STYLE_TAG.sub(lambda match: match.group(1) + _rewrite_stylesheet(match.group(2)) + match.group(3), text)
-    text = _STYLE_ATTR.sub(lambda match: match.group(1) + match.group(2) + _rewrite_declarations("body", match.group(3)) + match.group(2), text)
+    all_css = "\n".join(match.group(2) for match in _STYLE_TAG.finditer(text))
+    custom_system = _has_custom_design_system(all_css)
+    text = _STYLE_TAG.sub(
+        lambda match: match.group(0)
+        if _TEMPLATE_EXPR.search(match.group(2))
+        else match.group(1) + _rewrite_stylesheet(match.group(2), preserve_design=custom_system) + match.group(3),
+        text,
+    )
+    text = _STYLE_ATTR.sub(
+        lambda match: match.group(0)
+        if _TEMPLATE_EXPR.search(match.group(3))
+        else match.group(1)
+        + match.group(2)
+        + _rewrite_declarations("body", match.group(3), preserve_design=custom_system)
+        + match.group(2),
+        text,
+    )
     text = _rewrite_classes(text)
-    text = _EYEBROW.sub("", text)
-    text = _PILL.sub("", text)
+    text = _EYEBROW.sub(_safe_strip_box, text)
+    text = _PILL.sub(_safe_strip_box, text)
     text = _unnest_cards(text)
-    text = _TEXT.sub(_sentence_node, text)
-    text = _flatten_icons(text)
+    if not custom_system:
+        text = _TEXT.sub(_sentence_node, text)
+        text = _flatten_icons(text)
     return _ensure_checks(text)
 
 
-def _rewrite_stylesheet(css: str) -> str:
+def _rewrite_stylesheet(css: str, *, preserve_design: bool = False) -> str:
     pieces: list[str] = []
     cursor = 0
     while cursor < len(css):
@@ -112,19 +148,28 @@ def _rewrite_stylesheet(css: str) -> str:
         selector = css[cursor:brace]
         body = css[brace + 1 : end - 1]
         if "{" in body:
-            body = _rewrite_stylesheet(body)
+            body = _rewrite_stylesheet(body, preserve_design=preserve_design)
         else:
-            body = _rewrite_declarations(selector, body)
+            body = _rewrite_declarations(selector, body, preserve_design=preserve_design)
         if body.strip():
             pieces.append(selector + "{" + body + "}")
         cursor = end
     return "".join(pieces)
 
 
-def _rewrite_declarations(selector: str, body: str) -> str:
+_THEME_SELECTOR = re.compile(r"(?::root\b|\[data-theme\b|\.(?:dark|light)\b)", re.I)
+_CUSTOM_PROP_DEF = re.compile(r"(--[A-Za-z0-9_-]+)\s*:")
+
+
+def _is_theme_selector(selector: str) -> bool:
+    return _THEME_SELECTOR.search(selector) is not None
+
+
+def _rewrite_declarations(selector: str, body: str, *, preserve_design: bool = False) -> str:
     floats = _FLOAT.search(selector) is not None or _POSITION.search(body) is not None
-    keep_hex = selector.strip() in {":root"}
+    keep_hex = _is_theme_selector(selector) or preserve_design
     written: list[str] = []
+    changed = False
     for decl in body.split(";"):
         if ":" not in decl:
             if decl.strip():
@@ -135,19 +180,27 @@ def _rewrite_declarations(selector: str, body: str) -> str:
         updated = value
         if name in _MOTION_PROPS:
             updated = _motion(updated)
-        if name == "font-weight":
+        if name == "font-weight" and not preserve_design:
             updated = _weight(updated)
-        if name == "text-transform" and "uppercase" in updated.lower():
+        if name == "text-transform" and "uppercase" in updated.lower() and not preserve_design:
+            changed = True
             continue
         if name == "text-shadow" or (name == "filter" and "drop-shadow" in updated.lower()):
+            changed = True
             continue
-        if name == "box-shadow" and not floats:
+        if name == "box-shadow" and not floats and not preserve_design:
+            changed = True
             continue
         if any(kind in updated.lower() for kind in _GRADIENT):
+            changed = True
             continue
-        if not keep_hex:
+        if not keep_hex and not name.startswith("--"):
             updated = _HEX.sub(lambda match, prop_name=name: _token(prop_name, match.group(0)), updated)
+        if updated != value:
+            changed = True
         written.append(prop + ":" + updated)
+    if not changed:
+        return body
     rebuilt = ";".join(written)
     if body.strip().endswith(";") and rebuilt and not rebuilt.endswith(";"):
         rebuilt += ";"
@@ -236,6 +289,8 @@ def _rewrite_classes(html: str) -> str:
 
 
 def _sentence_node(match: re.Match[str]) -> str:
+    if _TEMPLATE_EXPR.search(match.group(2)):
+        return match.group(0)
     return match.group(1) + _sentence(match.group(2)) + match.group(3)
 
 
@@ -334,7 +389,56 @@ def _remove_class(attrs: str, name: str) -> str:
     return attrs[: match.start(2)] + " ".join(kept) + attrs[match.end(2) :]
 
 
+_LIGHT_TOKENS = (
+    ("--background", "oklch(0.97 0.003 106)"),
+    ("--surface", "oklch(1 0 0)"),
+    ("--foreground", "oklch(0.23 0 0)"),
+    ("--text-secondary", "oklch(0.48 0 0)"),
+    ("--border", "oklch(0.91 0.005 106)"),
+    ("--accent", "oklch(0.23 0 0)"),
+)
+_DARK_TOKENS = (
+    ("--background", "oklch(0.19 0 0)"),
+    ("--surface", "oklch(0.23 0 0)"),
+    ("--foreground", "oklch(0.97 0 0)"),
+    ("--text-secondary", "oklch(0.80 0 0)"),
+    ("--border", "oklch(0.29 0 0)"),
+    ("--accent", "oklch(0.97 0 0)"),
+)
+
+
 def _ensure_checks(html: str) -> str:
-    if "data-vibecleaner=\"design\"" in html or "</head>" not in html.lower():
+    if 'data-vibecleaner="design"' in html or "</head>" not in html.lower():
         return html
-    return re.sub(r"</head>", _CHECKS + "</head>", html, count=1, flags=re.I)
+    existing_css = "\n".join(match.group(2) for match in _STYLE_TAG.finditer(html))
+    defined_props = set(_CUSTOM_PROP_DEF.findall(existing_css))
+    has_own_theme = bool(defined_props)
+    referenced_vc_tokens = {
+        name for name, _ in _LIGHT_TOKENS if f"var({name})" in existing_css and name not in defined_props
+    }
+    light_to_add = [
+        (name, val)
+        for name, val in _LIGHT_TOKENS
+        if name not in defined_props and (not has_own_theme or name in referenced_vc_tokens)
+    ]
+    dark_to_add = [
+        (name, val)
+        for name, val in _DARK_TOKENS
+        if name not in defined_props and (not has_own_theme or name in referenced_vc_tokens)
+    ]
+    blocks: list[str] = []
+    if light_to_add:
+        body = "\n".join(f"  {name}: {val};" for name, val in light_to_add)
+        blocks.append(f":root {{\n{body}\n}}")
+    if "max-width: 390px" not in existing_css and not has_own_theme:
+        blocks.append("@media (max-width: 390px) {\n  img, svg, video { max-width: 100%; height: auto; }\n}")
+    if dark_to_add and "prefers-color-scheme: dark" not in existing_css:
+        body = "\n".join(f"    {name}: {val};" for name, val in dark_to_add)
+        blocks.append(f"@media (prefers-color-scheme: dark) {{\n  :root {{\n{body}\n  }}\n}}")
+    if ":focus-visible" not in existing_css:
+        outline_token = "var(--foreground)" if ("--foreground" in defined_props or any(n == "--foreground" for n, _ in light_to_add)) else "currentColor"
+        blocks.append(f":focus-visible {{ outline: 2px solid {outline_token}; outline-offset: 2px; }}")
+    if not blocks:
+        return html
+    injected = '<style data-vibecleaner="design">\n' + "\n".join(blocks) + "\n</style>\n"
+    return re.sub(r"</head>", injected + "</head>", html, count=1, flags=re.I)

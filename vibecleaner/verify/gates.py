@@ -44,6 +44,13 @@ _PYTEST = Gate(
     "python",
     (("pytest", "-q", "-x"), ("py.test", "-q")),
 )
+_DJANGO = Gate(
+    "django",
+    EvidenceKind.TEST_FAILURE,
+    ("python", "manage.py", "test", "--noinput"),
+    "python",
+    (("python3", "manage.py", "test", "--noinput"),),
+)
 _RUFF = Gate("ruff", EvidenceKind.LINT_ERROR, ("ruff", "check", "."), "python", (("python", "-m", "ruff", "check", "."),))
 _MYPY = Gate("mypy", EvidenceKind.TYPE_ERROR, ("mypy", "."), "python", (("python", "-m", "mypy", "."),))
 _PYRIGHT = Gate("pyright", EvidenceKind.TYPE_ERROR, ("pyright",), "python", (("npx", "pyright"),))
@@ -180,9 +187,12 @@ def dependency_hash(root: Path) -> str | None:
 def tool_env(sandbox_name: str, root: Path) -> dict[str, str]:
     prefixes: list[str] = []
     venv_bin = root / ".vibecleaner" / "cache" / f"venv-{sandbox_name}" / "bin"
+    project_venv_bin = root / ".venv" / "bin"
     node_bin = root / "node_modules" / ".bin"
     if venv_bin.is_dir():
         prefixes.append(str(venv_bin))
+    if sandbox_name == "host" and project_venv_bin.is_dir():
+        prefixes.append(str(project_venv_bin))
     if node_bin.is_dir():
         prefixes.append(str(node_bin))
     if not prefixes:
@@ -206,6 +216,8 @@ def _python_gates(root: Path) -> list[Gate]:
         gates.append(_PYRIGHT)
     if _wants_pytest(root, names, data, ini):
         gates.append(_PYTEST)
+    elif "django" in names and (root / "manage.py").is_file():
+        gates.append(_DJANGO)
     return gates
 
 
@@ -534,7 +546,7 @@ def _jvm_test_gate(root: Path) -> Gate | None:
 
 
 def _dotnet_test_gate(root: Path) -> Gate | None:
-    patterns = ("*.csproj", "*.fsproj", "*.vbproj", "*.sln")
+    patterns = ("*.csproj", "*.fsproj", "*.vbproj", "*.sln", "*/*.csproj")
     if any(any(root.glob(pattern)) for pattern in patterns):
         return Gate("dotnet", EvidenceKind.TEST_FAILURE, ("dotnet", "test"), "csharp")
     return None

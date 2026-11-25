@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
-from vibecleaner.models import Finding, ScanContext, SourceFile
+from vibecleaner.models import Finding, Language, ScanContext, SourceFile
 from vibecleaner.preflight.code_text import (
     code_only_text,
     comments_blanked,
@@ -49,6 +49,7 @@ def _is_usage_source(source: SourceFile) -> bool:
         return False
     return (
         is_blankable(source)
+        or source.language == Language.CSHARP
         or is_sql_path(source.path)
         or is_data_config_path(source.path)
         or is_markup_path(source.path)
@@ -60,10 +61,14 @@ def _is_test_path(path: str) -> bool:
     parts = set(pure.parts)
     if parts & {"tests", "test", "__tests__", "spec"}:
         return True
+    if any(part.lower().endswith((".tests", ".test")) for part in pure.parts[:-1]):
+        return True
     name = pure.name
     if name.startswith("test_") or name.endswith("_test.py"):
         return True
     if ".test." in name or ".spec." in name:
+        return True
+    if name.lower().endswith(("tests.cs", "test.cs")):
         return True
     return False
 

@@ -3,14 +3,44 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from vibecleaner.cache import DecisionCache
 from vibecleaner.decision_judge import judge, select_backend, units_to_skip
-from vibecleaner.models import DEFAULT_THRESHOLD, PROJECT_RULE_PREFIX, RULES, Finding, ScanContext, ScanResult
+from vibecleaner.models import DEFAULT_THRESHOLD, PROJECT_RULE_PREFIX, RULES, Finding, Language, ScanContext, ScanResult
 from vibecleaner.patcher import generate_fixes
 from vibecleaner.project_rules import apply_project_rules, load_project_rules
 from vibecleaner.risk import route_review
+
+_ANALYZED_LANGUAGES = frozenset(
+    {
+        Language.PYTHON,
+        Language.TYPESCRIPT,
+        Language.TSX,
+        Language.JAVASCRIPT,
+        Language.SQL,
+    }
+)
+_UNSUPPORTED_CODE_SUFFIXES = frozenset(
+    {
+        ".c", ".cc", ".cpp", ".cs", ".dart", ".ex", ".exs", ".fs", ".go",
+        ".h", ".hpp", ".java", ".kt", ".kts", ".lua", ".m", ".mm", ".php",
+        ".rb", ".rs", ".scala", ".swift", ".vb",
+    }
+)
+
+
+def _code_coverage(ctx: ScanContext) -> tuple[int, dict[str, int]]:
+    supported = 0
+    unsupported: dict[str, int] = {}
+    for source in ctx.files:
+        if source.language in _ANALYZED_LANGUAGES:
+            supported += 1
+            continue
+        suffix = PurePosixPath(source.path).suffix.lower()
+        if suffix in _UNSUPPORTED_CODE_SUFFIXES:
+            unsupported[suffix] = unsupported.get(suffix, 0) + 1
+    return supported, dict(sorted(unsupported.items()))
 
 
 def run_scan(
@@ -50,6 +80,7 @@ def run_scan(
     if fix:
         generate_fixes(findings, ctx)
     findings.sort(key=lambda finding: (-finding.severity.rank, finding.file, finding.line))
+    supported_code, unsupported_code = _code_coverage(ctx)
     result = ScanResult(
         root=ctx.root,
         findings=findings,
@@ -61,5 +92,7 @@ def run_scan(
         project_rule_specs=tuple(
             RULES[PROJECT_RULE_PREFIX + rule.id] for rule in project_rules.rules
         ),
+        supported_code_files=supported_code,
+        unsupported_code_files=unsupported_code,
     )
     return result, ctx

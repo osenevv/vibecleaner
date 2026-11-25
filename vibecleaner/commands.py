@@ -11,9 +11,11 @@ from vibecleaner.cleanup import FixReport, fix_tree, revert_rule
 from vibecleaner.collector import CollectorError, collect
 from vibecleaner.deslop import CONCERN_BRIEFS, DESLOP_CONCERNS, slop_score
 from vibecleaner.deterministic import run_deterministic
+from vibecleaner.fix_contract import Verdict
 from vibecleaner.init_cmd import render_init_summary, run_init
 from vibecleaner.models import PROJECT_RULE_PREFIX, Category, Finding, Severity
 from vibecleaner.preflight import Status, preflight_to_json, render_preflight_markdown, run_preflight
+from vibecleaner.prompt_fix import copy_to_clipboard, run_agent_fix
 from vibecleaner.project_rules import (
     DEFAULT_DESLOP_LANE,
     DESLOP_LANES,
@@ -28,6 +30,13 @@ from vibecleaner.project_rules import (
     rule_hits_preview,
 )
 from vibecleaner.reporter import markdown_cell, write_rows_sarif
+from vibecleaner.test_coverage import (
+    audit_test_coverage,
+    build_test_prompt,
+    generate_missing_tests,
+    render_coverage_markdown,
+)
+from vibecleaner.verify.tamper import check_tamper, snapshot
 
 _FAIL_CHOICES = ("critical", "high", "medium", "low", "none")
 _FAMILY_LANES = {"D8": "defensive-code"}
@@ -55,6 +64,7 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
     deslop.add_argument("path", nargs="?", default=".")
     deslop.add_argument("--diff", dest="diff_base", default=None, metavar="BASE", help="only files changed since BASE")
     deslop.add_argument("--out", default=None, metavar="PATH", help="default: <root>/VIBECLEANER_DESLOP.md")
+    deslop.add_argument("--no-report", action="store_true", help="do not write VIBECLEANER_DESLOP.md")
     deslop.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
     deslop.add_argument(
         "--fail-on",
@@ -66,7 +76,27 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
     preflight = sub.add_parser("preflight", help="42 launch-readiness checks from code evidence (read-only)")
     preflight.add_argument("path", nargs="?", default=".")
     preflight.add_argument("--out", default=None, metavar="PATH", help="default: <root>/VIBECLEANER_PREFLIGHT.md")
+    preflight.add_argument("--no-report", action="store_true", help="do not write VIBECLEANER_PREFLIGHT.md")
     preflight.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
+
+    tests = sub.add_parser("tests", help="audit test coverage/quality and generate missing test suites")
+    tests.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
+    tests.add_argument("--diff", dest="diff_base", default=None, metavar="BASE", help="only audit files changed since BASE")
+    tests.add_argument("--run-coverage", action="store_true", help="run pytest under sys.monitoring for real line coverage")
+    tests.add_argument("--generate", action="store_true", help="generate missing test suites and verify them")
+    tests.add_argument("--limit", type=int, default=10, metavar="N", help="maximum test files to generate (default: 10)")
+    tests.add_argument("--no-verify", action="store_true", help="skip running generated tests in the sandbox")
+    tests.add_argument("--keep-failing", action="store_true", help="keep generated test files even if verification fails")
+    tests.add_argument("--min-score", type=int, default=0, metavar="N", help="exit 1 when coverage score is below N (0..100)")
+    tests.add_argument("--fail-on", choices=_FAIL_CHOICES, default="none", help="exit 1 on coverage gaps at or above severity")
+    tests.add_argument("--prompt", action="store_true", help="print the AI prompt to implement missing/weak tests")
+    tests.add_argument("--copy", action="store_true", help="copy the AI test prompt to the clipboard")
+    tests.add_argument("--autofix", action="store_true", help="run an AI coding agent CLI to implement missing tests")
+    tests.add_argument("--agent", default=None, metavar="CMD", help="agent CLI for --autofix (claude, codex, gemini, agy, or command)")
+    tests.add_argument("--max-fix-rounds", type=int, default=1, metavar="N", help="maximum --autofix rounds (1..5, default: 1)")
+    tests.add_argument("--out", default=None, metavar="PATH", help="markdown report path (default: <root>/VIBECLEANER_TESTS.md)")
+    tests.add_argument("--no-report", action="store_true", help="do not write VIBECLEANER_TESTS.md")
+    tests.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
 
     rule = sub.add_parser("rule", help="turn a correction into a project rule in .vibecleaner/rules.json")
     actions = rule.add_subparsers(dest="rule_command", required=True)
@@ -105,7 +135,7 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
 
 def run_subcommand(args: argparse.Namespace) -> int | None:
     """Return an exit code for a command handled here, or None."""
-    handlers = {"init": _init, "fix": _fix, "deslop": _deslop, "preflight": _preflight, "rule": _rule}
+    handlers = {"init": _init, "fix": _fix, "deslop": _deslop, "preflight": _preflight, "tests": _tests, "rule": _rule}
     handler = handlers.get(args.command)
     return handler(args) if handler is not None else None
 
@@ -204,13 +234,16 @@ def _deslop(args: argparse.Namespace) -> int:
         json.dump(payload, sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
-        destination = Path(args.out) if args.out else root / "VIBECLEANER_DESLOP.md"
-        try:
-            destination.write_text(_deslop_markdown(lanes, score, len(ctx.files), args.diff_base), encoding="utf-8")
-        except OSError as exc:
-            return _error(exc)
         busy = sum(1 for items in lanes.values() if items)
-        print(f"wrote {destination} (slop score {score}, {len(slop)} finding(s) in {busy} lane(s))")
+        if getattr(args, "no_report", False):
+            print(f"deslop: slop score {score}, {len(slop)} finding(s) in {busy} lane(s)")
+        else:
+            destination = Path(args.out) if args.out else root / "VIBECLEANER_DESLOP.md"
+            try:
+                destination.write_text(_deslop_markdown(lanes, score, len(ctx.files), args.diff_base), encoding="utf-8")
+            except OSError as exc:
+                return _error(exc)
+            print(f"wrote {destination} (slop score {score}, {len(slop)} finding(s) in {busy} lane(s))")
     return 1 if fails_on(slop, args.fail_on) else 0
 
 
@@ -314,16 +347,19 @@ def _preflight(args: argparse.Namespace) -> int:
         json.dump(preflight_to_json(report), sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
-        destination = Path(args.out) if args.out else root / "VIBECLEANER_PREFLIGHT.md"
-        try:
-            destination.write_text(render_preflight_markdown(report), encoding="utf-8")
-        except OSError as exc:
-            return _error(exc)
         counts = {status: 0 for status in Status}
         for check in report.checks:
             counts[check.status] += 1
         summary = ", ".join(f"{count} {status.value}" for status, count in counts.items() if count)
-        print(f"wrote {destination} ({summary}; {len(report.blockers)} blocker(s))")
+        if getattr(args, "no_report", False):
+            print(f"preflight: {summary}; {len(report.blockers)} blocker(s)")
+        else:
+            destination = Path(args.out) if args.out else root / "VIBECLEANER_PREFLIGHT.md"
+            try:
+                destination.write_text(render_preflight_markdown(report), encoding="utf-8")
+            except OSError as exc:
+                return _error(exc)
+            print(f"wrote {destination} ({summary}; {len(report.blockers)} blocker(s))")
     return 1 if report.blockers else 0
 
 
@@ -430,3 +466,120 @@ def fails_on(findings: list[Finding], fail_on: str) -> bool:
 def _error(exc: Exception) -> int:
     print(f"error: {exc}", file=sys.stderr)
     return 2
+
+
+def _tests(args: argparse.Namespace) -> int:
+    if not 0 <= args.min_score <= 100:
+        return _error(ValueError("--min-score must be between 0 and 100"))
+    if args.limit < 1:
+        return _error(ValueError("--limit must be at least 1"))
+    if not 1 <= args.max_fix_rounds <= 5:
+        return _error(ValueError("--max-fix-rounds must be between 1 and 5"))
+
+    root = Path(args.path).expanduser().resolve()
+    try:
+        report = audit_test_coverage(root, diff_base=args.diff_base, run_coverage=args.run_coverage)
+    except (CollectorError, OSError) as exc:
+        return _error(exc)
+
+    generation = None
+    if args.generate and report.gaps:
+        generation = generate_missing_tests(
+            report,
+            limit=args.limit,
+            verify=not args.no_verify,
+            keep_failing=args.keep_failing,
+        )
+        if generation.tamper_blocked:
+            return _error(RuntimeError(f"test generation aborted due to tampering: {generation.tamper_detail}"))
+        if generation.created_count > 0:
+            report = audit_test_coverage(root, diff_base=args.diff_base, run_coverage=args.run_coverage)
+
+    if args.autofix and report.gaps:
+        autofix_code, report = _tests_autofix_loop(root, report, args)
+        if autofix_code is not None:
+            return autofix_code
+
+    write_report = not args.no_report and not args.json and not args.prompt
+    destination: Path | None = None
+    if write_report:
+        destination = Path(args.out) if args.out else root / "VIBECLEANER_TESTS.md"
+        try:
+            destination.write_text(render_coverage_markdown(report, generation), encoding="utf-8")
+        except OSError as exc:
+            return _error(exc)
+
+    if args.json:
+        payload = report.to_dict()
+        if generation is not None:
+            payload["generation"] = generation.to_dict()
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    elif args.prompt:
+        prompt = build_test_prompt(report)
+        if prompt:
+            print(prompt)
+    else:
+        dest_note = f" (wrote {destination})" if destination is not None else ""
+        print(
+            f"Test coverage score: {report.coverage_score}/100 "
+            f"({report.tested_modules}/{report.total_modules} modules, "
+            f"{report.tested_symbols}/{report.total_symbols} symbols, "
+            f"{len(report.gaps)} gap(s)){dest_note}"
+        )
+        if generation is not None and generation.results:
+            print(
+                f"Generated {generation.created_count} test file(s), "
+                f"{generation.verified_count} verified passing."
+            )
+
+    if args.copy and report.gaps:
+        prompt = build_test_prompt(report)
+        copied, info = copy_to_clipboard(prompt)
+        if copied:
+            print(f"Copied test prompt to clipboard via {info}.", file=sys.stderr)
+        else:
+            print(f"warning: could not copy test prompt ({info})", file=sys.stderr)
+
+    if args.min_score > 0 and report.coverage_score < args.min_score:
+        return 1
+    if _gaps_fail_on(report.gaps, args.fail_on):
+        return 1
+    return 0
+
+
+def _tests_autofix_loop(root: Path, report, args: argparse.Namespace):
+    stream = sys.stderr if (args.json or args.prompt) else sys.stdout
+    current = report
+    for round_num in range(1, args.max_fix_rounds + 1):
+        prompt = build_test_prompt(current)
+        if not prompt:
+            return None, current
+        before_score = current.coverage_score
+        before = snapshot(root)
+        outcome = run_agent_fix(root, prompt, agent=args.agent)
+        print(outcome.detail, file=stream)
+        if outcome.status == "failed":
+            return 2, current
+        if outcome.status in {"copied", "no_agent"}:
+            return None, current
+        tamper = check_tamper(before, root)
+        if tamper.verdict is Verdict.REVISE:
+            details = "; ".join(item.summary for item in tamper.evidence)
+            print(f"error: --autofix aborted due to test/config tampering: {details}", file=sys.stderr)
+            return 2, current
+        current = audit_test_coverage(root, diff_base=args.diff_base, run_coverage=args.run_coverage)
+        print(
+            f"VIBECLEANER TESTS AUTOFIX round {round_num}: score {before_score} -> {current.coverage_score}",
+            file=stream,
+        )
+        if not current.gaps or (args.min_score > 0 and current.coverage_score >= args.min_score):
+            return None, current
+    return None, current
+
+
+def _gaps_fail_on(gaps, fail_on: str) -> bool:
+    if fail_on == "none":
+        return False
+    minimum = Severity(fail_on).rank
+    return any(gap.severity.rank >= minimum for gap in gaps)

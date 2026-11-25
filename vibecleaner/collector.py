@@ -83,6 +83,7 @@ _EXT_LANGUAGE = {
     ".jsx": Language.JAVASCRIPT,
     ".mjs": Language.JAVASCRIPT,
     ".cjs": Language.JAVASCRIPT,
+    ".cs": Language.CSHARP,
     ".sql": Language.SQL,
 }
 _MAX_BYTES = 1024 * 1024

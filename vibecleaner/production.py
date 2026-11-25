@@ -238,10 +238,17 @@ def _distance(left: str, right: str) -> int:
     return grid[-1][-1]
 
 
+_STATIC_INNER_HTML = re.compile(r"""\.innerHTML\s*=\s*(?:'[^']*'|"[^"]*"|`[^`$]*`)\s*;?\s*$""")
+_ALL_CAPS = re.compile(r"^[A-Z][A-Z0-9_]+$")
+
+
+_DOC_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".txt"})
+
+
 def _sinks(files: list[SourceFile]) -> list[Finding]:
     found: list[Finding] = []
     for source in files:
-        if _is_test_path(source.path):
+        if _is_test_path(source.path) or Path(source.path).suffix.lower() in _DOC_SUFFIXES:
             continue
         if source.language == Language.PYTHON:
             found.extend(_python_sinks(source))
@@ -249,9 +256,124 @@ def _sinks(files: list[SourceFile]) -> list[Finding]:
         for index, line in enumerate(source.text.splitlines(), start=1):
             if line.lstrip().startswith(("'", '"', "`")):
                 continue
-            if "dangerouslySetInnerHTML" in line or re.search(r"\.innerHTML\s*=", line):
+            if "dangerouslySetInnerHTML" in line:
+                found.append(_hit("D5.unsafe_sink", source, index, "Raw HTML is rendered from data"))
+            elif re.search(r"\.innerHTML\s*=", line) and not _STATIC_INNER_HTML.search(line):
                 found.append(_hit("D5.unsafe_sink", source, index, "Raw HTML is rendered from data"))
     return found
+
+
+def _is_const_literal_dict(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Dict):
+        return False
+    for k, v in zip(node.keys, node.values):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return False
+        if isinstance(v, ast.Constant) and isinstance(v.value, str):
+            continue
+        if _is_const_literal_dict(v):
+            continue
+        return False
+    return True
+
+
+def _is_safe_placeholder_expr(node: ast.AST, safe_names: set[str]) -> bool:
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.Name):
+        return bool(_ALL_CAPS.match(node.id)) or node.id in safe_names
+    if isinstance(node, ast.IfExp):
+        return _is_safe_placeholder_expr(node.body, safe_names) and _is_safe_placeholder_expr(node.orelse, safe_names)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _is_safe_placeholder_expr(node.left, safe_names) and _is_safe_placeholder_expr(node.right, safe_names)
+    if isinstance(node, ast.JoinedStr):
+        return all(
+            isinstance(part, ast.Constant)
+            or (isinstance(part, ast.FormattedValue) and _is_safe_placeholder_expr(part.value, safe_names))
+            for part in node.values
+        )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and isinstance(node.func.value, ast.Constant)
+        and isinstance(node.func.value.value, str)
+        and len(node.args) == 1
+    ):
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and arg.id in safe_names:
+            return True
+        if isinstance(arg, ast.GeneratorExp) and isinstance(arg.elt, ast.Constant) and arg.elt.value == "?":
+            return True
+        if (
+            isinstance(arg, ast.BinOp)
+            and isinstance(arg.op, ast.Mult)
+            and isinstance(arg.left, (ast.List, ast.Tuple))
+            and len(arg.left.elts) == 1
+            and isinstance(arg.left.elts[0], ast.Constant)
+            and arg.left.elts[0].value == "?"
+        ):
+            return True
+    return False
+
+
+def _collect_safe_sql_locals(fn: ast.AST) -> set[str]:
+    """Collect local variable names in ``fn`` that are only ever assigned static SQL fragments or '?' placeholders."""
+    assigned: dict[str, list[ast.AST]] = {}
+    list_elems: dict[str, list[ast.AST]] = {}
+    dict_iter_safe: set[str] = set()
+
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned.setdefault(target.id, []).append(node.value)
+                    if _is_const_literal_dict(node.value):
+                        dict_iter_safe.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            assigned.setdefault(node.target.id, []).append(node.value)
+            if _is_const_literal_dict(node.value):
+                dict_iter_safe.add(node.target.id)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Name)
+            and len(node.args) == 1
+        ):
+            list_elems.setdefault(node.func.value.id, []).append(node.args[0])
+        elif isinstance(node, ast.For):
+            # Iterating over a constant dict of string literals (e.g. schema migrations).
+            if (
+                isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Attribute)
+                and node.iter.func.attr in {"items", "keys", "values"}
+                and isinstance(node.iter.func.value, ast.Name)
+                and node.iter.func.value.id in dict_iter_safe
+            ):
+                if isinstance(node.target, ast.Tuple):
+                    for elt in node.target.elts:
+                        if isinstance(elt, ast.Name):
+                            dict_iter_safe.add(elt.id)
+                elif isinstance(node.target, ast.Name):
+                    dict_iter_safe.add(node.target.id)
+
+    safe: set[str] = set(dict_iter_safe)
+    # Fixed-point propagation for simple safe lists and safe string fragments.
+    for _ in range(3):
+        for name, values in assigned.items():
+            if name in safe:
+                continue
+            # List of static SQL clauses (e.g. clauses = ["profile_id=?"]; clauses.append("status=?"))
+            if len(values) == 1 and isinstance(values[0], ast.List):
+                init_ok = all(_is_safe_placeholder_expr(e, safe) for e in values[0].elts)
+                appends_ok = all(_is_safe_placeholder_expr(e, safe) for e in list_elems.get(name, ()))
+                if init_ok and appends_ok:
+                    safe.add(name)
+                    continue
+            if values and all(_is_safe_placeholder_expr(v, safe) for v in values):
+                safe.add(name)
+    return safe
 
 
 def _python_sinks(source: SourceFile) -> list[Finding]:
@@ -260,6 +382,16 @@ def _python_sinks(source: SourceFile) -> list[Finding]:
     except SyntaxError:
         return []
     found: list[Finding] = []
+    # Map each call node to its enclosing function's safe SQL locals.
+    safe_by_call: dict[int, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            safe_locals = _collect_safe_sql_locals(node)
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    safe_by_call[id(child)] = safe_locals
+    module_safe = _collect_safe_sql_locals(tree)
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -271,7 +403,9 @@ def _python_sinks(source: SourceFile) -> list[Finding]:
         if label == "os.system" or _shell_true(node, label):
             found.append(_hit("D5.unsafe_sink", source, node.lineno, "A shell is started from a string"))
         if label.endswith(".execute") and node.args and isinstance(node.args[0], (ast.JoinedStr, ast.BinOp)):
-            found.append(_hit("D5.unsafe_sink", source, node.lineno, "SQL is built by string interpolation"))
+            safe_names = safe_by_call.get(id(node), module_safe)
+            if not _is_safe_placeholder_expr(node.args[0], safe_names):
+                found.append(_hit("D5.unsafe_sink", source, node.lineno, "SQL is built by string interpolation"))
         if label in {"eval", "exec"}:
             found.append(_hit("D5.unsafe_sink", source, node.lineno, "eval or exec runs a string as code"))
     return found

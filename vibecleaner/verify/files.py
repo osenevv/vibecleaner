@@ -35,6 +35,7 @@ _SKIP_DIRS = frozenset(
 )
 _CODE_SUFFIXES = {
     ".cjs": Language.JAVASCRIPT,
+    ".cs": Language.CSHARP,
     ".cts": Language.TYPESCRIPT,
     ".js": Language.JAVASCRIPT,
     ".jsx": Language.JAVASCRIPT,
@@ -109,6 +110,8 @@ def is_test_path(rel: str) -> bool:
         return True
     if name.startswith("test_") and name.endswith(".py"):
         return True
+    if name.endswith(("Tests.cs", "Test.cs")):
+        return True
     stem = path.stem
     return stem.endswith(".test") or stem.endswith(".spec")
 
@@ -116,6 +119,8 @@ def is_test_path(rel: str) -> bool:
 def is_config_path(rel: str) -> bool:
     name = PurePosixPath(rel).name
     if name in _CONFIG_NAMES:
+        return True
+    if name.endswith((".csproj", ".sln")) or name in {"Directory.Build.props", "Directory.Packages.props", "global.json", "nuget.config"}:
         return True
     return name.startswith((".eslintrc", "jest.config.", "vitest.config.", "tsconfig.", "requirements"))
 
@@ -146,12 +151,16 @@ def project_runtimes(root: Path) -> frozenset[str]:
         found.add("rust")
     if any((root / name).is_file() for name in ("pom.xml", "build.gradle", "build.gradle.kts")):
         found.add("jvm")
+    if any(root.glob("*.csproj")) or any(root.glob("*.sln")) or any(root.glob("*/*.csproj")):
+        found.add("csharp")
     for rel, _path in iter_files(root):
         language = language_for(rel)
         if language == Language.PYTHON:
             found.add("python")
         elif language in {Language.TYPESCRIPT, Language.TSX, Language.JAVASCRIPT}:
             found.add("node")
+        elif language == Language.CSHARP:
+            found.add("csharp")
         elif rel.endswith(".go"):
             found.add("go")
         elif rel.endswith(".rs"):

@@ -198,3 +198,48 @@ def test_one_rule_can_be_reverted(tmp_path: Path) -> None:
     assert "breakpoint" not in (tmp_path / "app.py").read_text(encoding="utf-8")
     revert_rule(tmp_path, "D9.debug_leftover")
     assert "breakpoint()" in (tmp_path / "app.py").read_text(encoding="utf-8")
+
+
+def test_markdown_tables_lists_logs_and_non_tic_prose_are_preserved(tmp_path: Path) -> None:
+    (tmp_path / "WalletService.cs").write_text(
+        "public class WalletService { public string SyncEsploraBalance() => \"ok\"; }\n",
+        encoding="utf-8",
+    )
+    readme = (
+        "# SatFreedom\n\n"
+        "## Screens\n\n"
+        "| Screen | Description |\n"
+        "|---|---|\n"
+        "| Dashboard | Savings progress and balance audit against logged entries |\n"
+        "| Wallets | Add, edit, and manage watch addresses for tracking |\n\n"
+        "- **Counts toward goal**: Include the wallet balance in the savings target.\n"
+        "- **Delete wallet**: Wallets with existing journal entries cannot be deleted.\n\n"
+        "Click Edit on any wallet row. The form updates to show current values. "
+        "Click Save wallet to apply changes or Cancel to abort.\n\n"
+        "This seamless platform unlocks a cutting-edge future for every team.\n"
+    )
+    papercuts = (
+        "# Papercuts\n\n"
+        "The first multi-view copy cleanup patch used context from a different file order "
+        "and did not apply; split it into one-file patches after reading exact line context.\n\n"
+        "This seamless platform unlocks a cutting-edge future.\n"
+    )
+    (tmp_path / "README.md").write_text(readme, encoding="utf-8")
+    (tmp_path / "PAPERCUTS.md").write_text(papercuts, encoding="utf-8")
+
+    report = fix_tree(tmp_path, use_host=False)
+    updated_readme = (tmp_path / "README.md").read_text(encoding="utf-8")
+    updated_papercuts = (tmp_path / "PAPERCUTS.md").read_text(encoding="utf-8")
+
+    assert "| Dashboard |" in updated_readme
+    assert "- **Counts toward goal**" in updated_readme
+    assert "Click Edit on any wallet row." in updated_readme
+    assert "seamless platform" not in updated_readme
+    assert updated_papercuts == papercuts
+    assert report.changed == ("README.md",)
+
+    checkpoint = json.loads((tmp_path / ".vibecleaner" / "checkpoint.json").read_text(encoding="utf-8"))
+    assert checkpoint["rules"]["README.md"] == ["prose.drop"]
+
+    revert_rule(tmp_path, "prose.drop")
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == readme

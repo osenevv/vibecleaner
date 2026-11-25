@@ -24,6 +24,7 @@ _SKIP_NAMES = frozenset(
         "license.md",
         "licence.md",
         "copying.md",
+        "papercuts.md",
     }
 )
 
