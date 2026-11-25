@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import sys
-from collections.abc import Mapping
-from pathlib import Path
+from collections.abc import Mapping, Sequence
 
 from vibecleaner.fix_contract import (
     CheckResult,
     Evidence,
     EvidenceKind,
     FixContext,
+    ProviderError,
     Verdict,
 )
-from vibecleaner.jury.asking import iter_judges
+from vibecleaner.jury.asking import DEFAULT_JUDGE_TIMEOUT_S, complete_judge_async, iter_judges
 from vibecleaner.jury.parsing import parse_model_json
 from vibecleaner.jury.slices import slice_changed
 
@@ -26,6 +28,9 @@ SPECIALISTS: tuple[tuple[str, str, str], ...] = (
     ("error_handling", "error handling", "Checking error handling"),
     ("abstraction", "leaky abstractions and overcomplication", "Checking for needless complexity"),
 )
+
+DEFAULT_CONCURRENCY = 4
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9_]+")
 
 _SYSTEM = (
     "You are a specialist reviewer for {title}. "
@@ -41,34 +46,107 @@ def run_specialist(
     name: str,
     title: str,
     changed: Mapping[str, frozenset[int]],
+    *,
+    timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
 ) -> CheckResult:
+    """Run one specialist reviewer synchronously."""
+    return asyncio.run(run_specialist_async(ctx, name, title, changed, timeout_s=timeout_s))
+
+
+async def run_specialist_async(
+    ctx: FixContext,
+    name: str,
+    title: str,
+    changed: Mapping[str, frozenset[int]],
+    *,
+    semaphore: asyncio.Semaphore | None = None,
+    prompt: str | None = None,
+    timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
+) -> CheckResult:
+    """Run one specialist reviewer asynchronously without blocking the event loop."""
     judges = iter_judges(ctx.team)
     if not judges:
         return CheckResult(name, Verdict.PASS)
     system = _SYSTEM.format(title=title)
-    prompt = slice_changed(ctx.root, changed) or "No changed functions."
+    body = prompt if prompt is not None else (slice_changed(ctx.root, changed) or "No changed functions.")
     evidence: list[Evidence] = []
     notes: list[Evidence] = []
     for index, judge in enumerate(judges):
         try:
-            raw = judge.complete(system, prompt, json_mode=True)
-        except Exception as exc:
-            from vibecleaner.fix_contract import ProviderError
-
-            if not isinstance(exc, ProviderError):
-                raise
-            log.warning("judge %s failed: %s", judge.name, exc)
+            if semaphore is not None:
+                async with semaphore:
+                    raw = await complete_judge_async(judge, system, body, json_mode=True, timeout_s=timeout_s)
+            else:
+                raw = await complete_judge_async(judge, system, body, json_mode=True, timeout_s=timeout_s)
+        except ProviderError as exc:
+            log.warning("judge %s failed for %s: %s", judge.name, name, exc)
             continue
         payload = parse_model_json(raw)
         findings = _findings(payload)
         for offset, finding in enumerate(findings):
-            _classify(ctx, name, finding, index * 100 + offset, evidence, notes)
+            await _classify_async(ctx, name, finding, index * 100 + offset, evidence, notes)
     if evidence:
         return CheckResult(name, Verdict.REVISE, evidence=tuple(evidence), notes=tuple(notes))
     return CheckResult(name, Verdict.PASS, notes=tuple(notes))
 
 
-def _classify(
+async def run_panel_async(
+    ctx: FixContext,
+    changed: Mapping[str, frozenset[int]],
+    *,
+    specialists: Sequence[tuple[str, str, str]] = SPECIALISTS,
+    max_concurrency: int = DEFAULT_CONCURRENCY,
+    timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
+) -> CheckResult:
+    """Run all specialist reviewers concurrently under an asyncio.Semaphore."""
+    if not iter_judges(ctx.team) or not specialists:
+        return CheckResult("jury", Verdict.PASS)
+    prompt = slice_changed(ctx.root, changed) or "No changed functions."
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
+    tasks = [
+        run_specialist_async(
+            ctx,
+            name,
+            title,
+            changed,
+            semaphore=semaphore,
+            prompt=prompt,
+            timeout_s=timeout_s,
+        )
+        for name, title, _status in specialists
+    ]
+    results = await asyncio.gather(*tasks)
+    evidence: list[Evidence] = []
+    notes: list[Evidence] = []
+    for result in results:
+        evidence.extend(result.evidence)
+        notes.extend(result.notes)
+    if evidence:
+        return CheckResult("jury", Verdict.REVISE, evidence=tuple(evidence), notes=tuple(notes))
+    return CheckResult("jury", Verdict.PASS, notes=tuple(notes))
+
+
+def run_panel(
+    ctx: FixContext,
+    changed: Mapping[str, frozenset[int]],
+    *,
+    specialists: Sequence[tuple[str, str, str]] = SPECIALISTS,
+    max_concurrency: int = DEFAULT_CONCURRENCY,
+    timeout_s: float = DEFAULT_JUDGE_TIMEOUT_S,
+) -> CheckResult:
+    """Sync boundary wrapper around ``run_panel_async`` for CLI callers."""
+    return asyncio.run(
+        run_panel_async(
+            ctx,
+            changed,
+            specialists=specialists,
+            max_concurrency=max_concurrency,
+            timeout_s=timeout_s,
+        )
+    )
+
+
+async def _classify_async(
     ctx: FixContext,
     node: str,
     finding: dict[str, object],
@@ -85,7 +163,7 @@ def _classify(
     if not isinstance(probe, str) or not probe.strip():
         notes.append(Evidence(EvidenceKind.JUDGE_NOTE, problem, file=file_text, line=line_no))
         return
-    command, result = _run_probe(ctx, probe, index)
+    command, result = await asyncio.to_thread(_run_probe, ctx, node, probe, index)
     if result.ok or not _real_failure(result.stdout + result.stderr):
         notes.append(Evidence(EvidenceKind.JUDGE_NOTE, problem, file=file_text, line=line_no))
         return
@@ -102,11 +180,12 @@ def _classify(
     )
 
 
-def _run_probe(ctx: FixContext, probe: str, index: int):
+def _run_probe(ctx: FixContext, node: str, probe: str, index: int):
     scratch = ctx.root / ".vibecleaner" / "jury"
     scratch.mkdir(parents=True, exist_ok=True)
     suffix = ".ts" if "vitest" in probe or "from 'vitest'" in probe else ".py"
-    path = scratch / f"probe_{index}{suffix}"
+    safe_node = _SAFE_NAME.sub("_", node).strip("_") or "jury"
+    path = scratch / f"probe_{safe_node}_{index}{suffix}"
     path.write_text(_body(probe, suffix), encoding="utf-8")
     relative = path.relative_to(ctx.root).as_posix()
     if suffix == ".py":

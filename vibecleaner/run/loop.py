@@ -23,7 +23,7 @@ from vibecleaner.fix_contract import (
     Team,
     Verdict,
 )
-from vibecleaner.jury.panel import run_specialist
+from vibecleaner.jury.panel import run_panel
 from vibecleaner.jury.scan_nodes import ScanLedger, run_static
 from vibecleaner.repair.workspace import (
     add_worktree,
@@ -231,7 +231,7 @@ def _attempt_fix(ctx: FixContext, team: Team, failure: CheckResult, summary: str
                 seen_states.add(sig)
                 current_failure = still
                 continue
-            verdict = run_specialist(wt_ctx, "jury", "Correctness and security", changed_lines(worktree, base_sha))
+            verdict = run_panel(wt_ctx, changed_lines(worktree, base_sha))
             if verdict.verdict is Verdict.REVISE:
                 _cleanup_branch(ctx.root, worktree, branch)
                 current_failure = verdict
