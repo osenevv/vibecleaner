@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from pathlib import Path
 
 import pytest
 
+from pathcmd import install_path_command
 from vibecleaner.cli import main
 from vibecleaner.models import RiskTier, Severity
 from vibecleaner.test_coverage import (
@@ -19,11 +19,6 @@ from vibecleaner.test_coverage import (
     generate_missing_tests,
     render_coverage_markdown,
 )
-
-
-def _write_executable(path: Path, body: str) -> None:
-    path.write_text(body, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def test_audit_detects_missing_partial_error_and_lackluster_tests_python(tmp_path: Path) -> None:
@@ -253,36 +248,40 @@ def test_cli_tests_autofix_improves_coverage_and_blocks_tamper(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (tmp_path / "calc.py").write_text(
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text(
         "def triple(n: int) -> int:\n    return n * 3\n",
         encoding="utf-8",
     )
     bin_dir = tmp_path / "_bin"
-    bin_dir.mkdir()
-    good_agent = bin_dir / "fake-agent"
-    _write_executable(
-        good_agent,
-        "#!/bin/sh\n"
-        "mkdir -p tests\n"
-        "cat > tests/test_calc.py <<'EOF'\n"
-        "from calc import triple\n\n"
-        "def test_triple():\n"
-        "    assert triple(3) == 9\n"
-        "EOF\n",
+    install_path_command(
+        bin_dir,
+        "good-agent",
+        "from pathlib import Path\n"
+        "Path('tests').mkdir(exist_ok=True)\n"
+        "Path('tests/test_calc.py').write_text(\n"
+        "    'from calc import triple\\n\\ndef test_triple():\\n    assert triple(3) == 9\\n',\n"
+        "    encoding='utf-8',\n"
+        ")\n",
+    )
+    install_path_command(
+        bin_dir,
+        "bad-agent",
+        "from pathlib import Path\n"
+        "Path('tests/test_calc.py').unlink(missing_ok=True)\n",
     )
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
-    rc = main(["tests", str(tmp_path), "--autofix", "--agent", str(good_agent), "--min-score", "80", "--no-report"])
+    rc = main(["tests", str(repo), "--autofix", "--agent", "good-agent", "--min-score", "80", "--no-report"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "score 0 -> 100" in out
 
     # Now add a second untested module and run a tampering agent that deletes tests/test_calc.py.
-    (tmp_path / "other.py").write_text("def quad(n: int) -> int:\n    return n * 4\n", encoding="utf-8")
-    bad_agent = bin_dir / "bad-agent"
-    _write_executable(bad_agent, "#!/bin/sh\nrm -f tests/test_calc.py\n")
+    (repo / "other.py").write_text("def quad(n: int) -> int:\n    return n * 4\n", encoding="utf-8")
 
-    rc_tamper = main(["tests", str(tmp_path), "--autofix", "--agent", str(bad_agent), "--no-report"])
+    rc_tamper = main(["tests", str(repo), "--autofix", "--agent", "bad-agent", "--no-report"])
     assert rc_tamper == 2
     err = capsys.readouterr().err
     assert "tampering" in err.lower()
@@ -312,3 +311,36 @@ def test_audit_discovers_tests_even_when_vibecleanerignore_excludes_tests(tmp_pa
     assert report.tested_modules == 1
     assert report.coverage_score == 100
     assert report.gaps == ()
+
+
+def test_audit_reads_js_istanbul_coverage_summary(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"devDependencies": {"vitest": "^2.0.0"}}', encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "math.ts").write_text("export function add(a: number, b: number) { return a + b; }\n", encoding="utf-8")
+    (src / "math.test.ts").write_text(
+        'import { it, expect } from "vitest";\nimport { add } from "./math";\nit("adds", () => { expect(add(1, 2)).toBe(3); });\n',
+        encoding="utf-8",
+    )
+    cov_dir = tmp_path / "coverage"
+    cov_dir.mkdir()
+    (cov_dir / "coverage-summary.json").write_text(
+        json.dumps({"total": {"lines": {"pct": 50}}, "src/math.ts": {"lines": {"pct": 50.0}}}),
+        encoding="utf-8",
+    )
+    report = audit_test_coverage(tmp_path, run_coverage=True)
+    assert report.dynamic_coverage_ran is True
+    assert report.modules[0].line_coverage_pct == 50.0
+    assert any(g.kind is GapKind.LOW_LINE_COVERAGE for g in report.gaps)
+
+
+def test_generate_missing_tests_handles_class_methods(tmp_path: Path) -> None:
+    (tmp_path / "counter.py").write_text(
+        "class Counter:\n    def inc(self, n: int) -> int:\n        return n + 1\n",
+        encoding="utf-8",
+    )
+    before = audit_test_coverage(tmp_path)
+    summary = generate_missing_tests(before, limit=5, verify=True)
+    assert summary.verified_count == 1
+    after = audit_test_coverage(tmp_path)
+    assert after.tested_symbols == 1

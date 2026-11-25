@@ -54,6 +54,11 @@ jobs:
         run: |
           vibecleaner scan . --mode offline --no-cache --quiet
           vibecleaner deslop .
+          vibecleaner doctor .
+      - name: Dependency vulnerability audit
+        run: |
+          python -m pip install pip-audit
+          pip-audit
 
   wheel-smoke:
     runs-on: ubuntu-latest
@@ -71,7 +76,9 @@ jobs:
           mkdir -p /tmp/vg-smoke-repo
           printf 'def add(a: int, b: int) -> int:\n    return a + b\n' > /tmp/vg-smoke-repo/app.py
           /tmp/vg-smoke-venv/bin/vibecleaner version
-          /tmp/vg-smoke-venv/bin/vibecleaner version
+          /tmp/vg-smoke-venv/bin/vibecleaner doctor /tmp/vg-smoke-repo
           /tmp/vg-smoke-venv/bin/vibecleaner init /tmp/vg-smoke-repo --no-hook --antigravity
           test -f /tmp/vg-smoke-repo/.agents/plugins/vibecleaner/plugin.json
           /tmp/vg-smoke-venv/bin/vibecleaner /tmp/vg-smoke-repo --quiet --mode offline --no-cache --no-report
+          /tmp/vg-smoke-venv/bin/vibecleaner tests /tmp/vg-smoke-repo --generate --no-verify --min-score 80 --no-report
+          /tmp/vg-smoke-venv/bin/vibecleaner preflight /tmp/vg-smoke-repo --json > /dev/null

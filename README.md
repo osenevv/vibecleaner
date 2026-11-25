@@ -62,6 +62,9 @@ vibecleaner start .                         # check static scan, project tests, 
 vibecleaner deslop .                        # group slop into 8 cleanup lanes (VIBECLEANER_DESLOP.md)
 vibecleaner preflight .                     # 42 read-only launch checks (VIBECLEANER_PREFLIGHT.md)
 vibecleaner states .                        # state machines and stuck transitions (VIBECLEANER_STATES.md)
+vibecleaner tests . --run-coverage          # audit test coverage & quality (VIBECLEANER_TESTS.md)
+vibecleaner tests . --generate --min-score 80  # generate & verify missing test suites on any app
+vibecleaner doctor .                        # check Python, Git, Docker, API keys, agent CLIs, and repo config
 vibecleaner rule list                       # list project rules from .vibecleaner/rules.json
 vibecleaner rule add-pattern ID --pattern 'REGEX' --message 'MSG' --lane ai-slop --preview
 vibecleaner rule add-boundary ID --from 'GLOB' --forbid 'PKG' --message 'MSG' --preview

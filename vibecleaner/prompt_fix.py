@@ -196,7 +196,10 @@ def resolve_agent_command(agent: str | None = None) -> tuple[str, list[str]] | N
         if cleaned in preset_map:
             cmd = list(preset_map[cleaned])
             return (cleaned, cmd) if shutil.which(cmd[0]) else None
-        parts = shlex.split(cleaned, posix=(os.name != "nt"))
+        parts = [
+            part[1:-1] if len(part) >= 2 and part[0] == part[-1] and part[0] in {'"', "'"} else part
+            for part in shlex.split(cleaned, posix=(os.name != "nt"))
+        ]
         if not parts:
             return None
         exe = parts[0]

@@ -45,6 +45,10 @@ inputs:
     description: Upload the SARIF file with github/codeql-action/upload-sarif when true
     required: false
     default: "true"
+  min-test-score:
+    description: Optional minimum test-coverage audit score (0 disables the check, 1..100 enforces `vibecleaner tests`)
+    required: false
+    default: "0"
 
 outputs:
   exit-code:
@@ -90,6 +94,7 @@ runs:
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_SARIF: ${{ inputs.sarif }}
         INPUT_GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        INPUT_MIN_TEST_SCORE: ${{ inputs.min-test-score }}
         EVENT_NAME: ${{ github.event_name }}
         BASE_REF: ${{ github.base_ref }}
       run: |
@@ -116,6 +121,14 @@ runs:
         set +e
         vibecleaner "${args[@]}"
         code=$?
+        if [ "$code" -eq 0 ] && [ "${INPUT_MIN_TEST_SCORE:-0}" -gt 0 ] 2>/dev/null; then
+          test_args=(tests "$INPUT_PATH" --min-score "$INPUT_MIN_TEST_SCORE" --no-report)
+          if [ -n "$diff_base" ]; then
+            test_args+=(--diff "$diff_base")
+          fi
+          vibecleaner "${test_args[@]}"
+          code=$?
+        fi
         set -e
         printf 'exit_code=%s\n' "$code" >> "$GITHUB_OUTPUT"
         if [ -n "${RUNNER_TEMP:-}" ]; then

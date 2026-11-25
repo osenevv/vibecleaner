@@ -147,7 +147,16 @@ def audit_test_coverage(
     dynamic_ran = False
     dynamic_note: str | None = None
     if run_coverage and TestFramework.PYTEST in frameworks:
-        dynamic_map, dynamic_ran, dynamic_note = _run_python_line_coverage(root)
+        py_map, py_ran, py_note = _run_python_line_coverage(root)
+        dynamic_map.update(py_map)
+        dynamic_ran = dynamic_ran or py_ran
+        dynamic_note = py_note
+    if run_coverage and (TestFramework.VITEST in frameworks or TestFramework.JEST in frameworks):
+        js_map, js_ran, js_note = _read_js_coverage_summary(root)
+        dynamic_map.update(js_map)
+        dynamic_ran = dynamic_ran or js_ran
+        if js_note and dynamic_note is None:
+            dynamic_note = js_note
 
     quality_issues = _audit_test_quality(test_files)
     modules: list[ModuleCoverage] = []
@@ -694,13 +703,26 @@ def exec_lines(path):
     walk(tree.body)
     return lines
 
-tid = sys.monitoring.COVERAGE_ID
-sys.monitoring.use_tool_id(tid, "vibecleaner-target-cov")
-sys.monitoring.register_callback(tid, sys.monitoring.events.LINE, on_line)
-sys.monitoring.set_events(tid, sys.monitoring.events.LINE)
-rc = pytest.main(["-q", "--tb=no", "-p", "no:cacheprovider"])
-sys.monitoring.set_events(tid, 0)
-sys.monitoring.free_tool_id(tid)
+if hasattr(sys, "monitoring"):
+    tid = sys.monitoring.COVERAGE_ID
+    sys.monitoring.use_tool_id(tid, "vibecleaner-target-cov")
+    sys.monitoring.register_callback(tid, sys.monitoring.events.LINE, on_line)
+    sys.monitoring.set_events(tid, sys.monitoring.events.LINE)
+    rc = pytest.main(["-q", "--tb=no", "-p", "no:cacheprovider"])
+    sys.monitoring.set_events(tid, 0)
+    sys.monitoring.free_tool_id(tid)
+else:
+    def _trace(frame, event, arg):
+        if event == "line":
+            fn = frame.f_code.co_filename
+            if fn.startswith(str(root)):
+                executed.setdefault(fn, set()).add(frame.f_lineno)
+        return _trace
+    sys.settrace(_trace)
+    try:
+        rc = pytest.main(["-q", "--tb=no", "-p", "no:cacheprovider"])
+    finally:
+        sys.settrace(None)
 
 report = {}
 for path in root.rglob("*.py"):
@@ -719,9 +741,7 @@ out_path.write_text(json.dumps({"rc": rc, "files": report}), encoding="utf-8")
 
 
 def _run_python_line_coverage(root: Path) -> tuple[dict[str, tuple[float, tuple[int, ...]]], bool, str | None]:
-    """Run pytest under Python 3.12 sys.monitoring in the target repo without extra deps."""
-    if not hasattr(sys, "monitoring"):
-        return {}, False, "Dynamic coverage requires Python 3.12+ (sys.monitoring)."
+    """Run pytest under sys.monitoring (3.12+) or sys.settrace (3.11) without extra deps."""
     python_bin = _target_python(root)
     with tempfile.TemporaryDirectory(prefix="vibecleaner-cov-") as tmp:
         runner = Path(tmp) / "run_cov.py"
@@ -767,6 +787,37 @@ def _target_python(root: Path) -> str:
         if candidate.is_file():
             return str(candidate)
     return sys.executable
+
+
+def _read_js_coverage_summary(root: Path) -> tuple[dict[str, tuple[float, tuple[int, ...]]], bool, str | None]:
+    """Read Vitest/Jest Istanbul ``coverage/coverage-summary.json`` if present."""
+    summary_path = root / "coverage" / "coverage-summary.json"
+    if not summary_path.is_file():
+        return {}, False, None
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {}, False, f"Could not read {summary_path.name}: {exc}"
+    if not isinstance(payload, dict):
+        return {}, False, None
+    resolved_root = root.resolve()
+    result: dict[str, tuple[float, tuple[int, ...]]] = {}
+    for key, entry in payload.items():
+        if key == "total" or not isinstance(entry, dict):
+            continue
+        lines_info = entry.get("lines")
+        if not isinstance(lines_info, dict) or not isinstance(lines_info.get("pct"), (int, float)):
+            continue
+        path = Path(key)
+        if path.is_absolute():
+            try:
+                rel = path.resolve().relative_to(resolved_root).as_posix()
+            except ValueError:
+                continue
+        else:
+            rel = PurePosixPath(key.replace("\\", "/")).as_posix()
+        result[rel] = (float(lines_info["pct"]), ())
+    return result, bool(result), None
 
 
 def _discover_test_files(root: Path) -> list[SourceFile]:

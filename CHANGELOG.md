@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Target-app test coverage audit & missing test suite generator (`vibecleaner tests`)**:
+  - Audits Python and TypeScript/JavaScript repositories for missing module test suites, untested public symbols, missing error/rejection paths, lackluster tests (assertionless, tautological, weak JS matchers, skipped/focused, mock-heavy), and optional dynamic line coverage (`--run-coverage` via Python 3.12 `sys.monitoring` / Python 3.11 `sys.settrace` and JS/TS Istanbul `coverage/coverage-summary.json`).
+  - Generates and sandbox-verifies missing `pytest` / `vitest` / `jest` test suites (`--generate`) without overwriting existing tests, plus `--prompt`, `--copy`, and tamper-guarded `--autofix` support.
+- **Environment & repo diagnostics (`vibecleaner doctor`)**: Checks Python version, Git, Node, Docker daemon reachability, Layer 2 API keys, installed coding-agent CLIs, and `.vibecleaner/` config/rules validity (`--json` supported).
+- **CI & GitHub Action enhancements**: Added `min-test-score` input to `action.yml`, `pip-audit` dependency check and expanded `wheel-smoke` checks (`doctor`, `tests`, `preflight`) in `.github/workflows/ci.yml`.
+
 ### Fixed & Hardened (System-Wide Post-Fix Safety & Detector Precision)
+- **Cross-platform Windows & Python 3.11 compatibility**:
+  - Preserved exact line endings (`newline=""`) when restoring original file contents in `cleanup.py` (`revert_rule` and `_restore_others`), fixing doubled CRLF newlines on Windows.
+  - Guarded POSIX `os.getuid`/`os.getgid` in `verify/sandbox.py` and stripped surrounding quotes from `--agent` commands on Windows in `prompt_fix.py`.
 - **Regression-aware post-fix test gate (`repo_health.py`, `cleanup.py`)**: `run_local_gates_detailed` + `gate_regression` now diff failure signatures (`post - baseline`) instead of treating any pre-existing failing test as a reason to skip verification. Newly introduced test failures now trigger automatic per-rule isolation and rollback even on repositories with pre-existing failures. Also skips broken `.venv` symlinks cleanly and falls back to working Python interpreters.
 - **Dynamic patch-target & module-attribute verification (`repo_health.py`)**: `verify_static_tree` now verifies `monkeypatch.setattr("pkg.mod.attr", ...)`, `patch("pkg.mod.attr", ...)`, and module-attribute references (`mod.attr`) across all repo files (including tests) against touched modules.
 - **HTML/CSS surface invariant verifier & custom-design preservation (`repo_health.py`, `surface_rules.py`, `cleanup.py`)**:

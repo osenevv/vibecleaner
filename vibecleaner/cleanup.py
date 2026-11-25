@@ -235,7 +235,7 @@ def revert_rule(root: Path, rule: str) -> tuple[str, ...]:
                 destination.unlink()
         else:
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(data["original"][file], encoding="utf-8")
+            destination.write_text(data["original"][file], encoding="utf-8", newline="")
         data["rules"][file] = [item for item in rules if item != rule]
         restored.append(file)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -1259,16 +1259,16 @@ def _restore_others(root: Path, before: dict[str, str], allowed: set[str]) -> No
                     ast.parse(source.text)
                 except SyntaxError:
                     if path in before:
-                        source.abs_path.write_text(before[path], encoding="utf-8")
+                        source.abs_path.write_text(before[path], encoding="utf-8", newline="")
             elif source.language in {Language.TYPESCRIPT, Language.TSX, Language.JAVASCRIPT} and not _parses(
                 source, source.text
             ):
                 if path in before:
-                    source.abs_path.write_text(before[path], encoding="utf-8")
+                    source.abs_path.write_text(before[path], encoding="utf-8", newline="")
             continue
         if path in before:
             if source.text != before[path]:
-                source.abs_path.write_text(before[path], encoding="utf-8")
+                source.abs_path.write_text(before[path], encoding="utf-8", newline="")
         else:
             source.abs_path.unlink(missing_ok=True)
     for path, text in before.items():
@@ -1277,4 +1277,4 @@ def _restore_others(root: Path, before: dict[str, str], allowed: set[str]) -> No
         destination = root / path
         if not destination.is_file():
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(text, encoding="utf-8")
+            destination.write_text(text, encoding="utf-8", newline="")

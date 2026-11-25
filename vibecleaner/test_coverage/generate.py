@@ -203,14 +203,18 @@ def _render_suite(root: Path, mod: ModuleCoverage, framework: TestFramework) -> 
 
 def _render_python_suite(mod: ModuleCoverage) -> tuple[str, int]:
     target_names = set(mod.untested_symbols)
-    symbols = [sym for sym in mod.symbols if sym.qualname in target_names and "." not in sym.qualname]
-    if not symbols:
+    top_symbols = [sym for sym in mod.symbols if sym.qualname in target_names and "." not in sym.qualname]
+    method_symbols = [sym for sym in mod.symbols if sym.qualname in target_names and "." in sym.qualname]
+    if not top_symbols and not method_symbols:
         return "", 0
 
     module_import = _python_import_path(mod.path)
-    import_names = sorted({sym.name for sym in symbols})
-    needs_path = any(ann == "Path" for sym in symbols for _n, ann, _d in sym.parameters)
-    needs_asyncio = any(sym.is_async for sym in symbols)
+    import_names = sorted(
+        {sym.name for sym in top_symbols} | {sym.qualname.split(".", 1)[0] for sym in method_symbols}
+    )
+    all_symbols = [*top_symbols, *method_symbols]
+    needs_path = any(ann == "Path" for sym in all_symbols for _n, ann, _d in sym.parameters)
+    needs_asyncio = any(sym.is_async for sym in all_symbols)
 
     lines: list[str] = [
         f'"""Generated coverage tests for {mod.path}."""',
@@ -227,7 +231,7 @@ def _render_python_suite(mod: ModuleCoverage) -> tuple[str, int]:
     lines.append("")
 
     count = 0
-    for sym in symbols:
+    for sym in top_symbols:
         call_args = _python_sample_args(sym)
         if call_args is None:
             lines.extend(
@@ -291,6 +295,17 @@ def _render_python_suite(mod: ModuleCoverage) -> tuple[str, int]:
                 ]
             )
             count += 1
+
+    for sym in method_symbols:
+        cls_name, method_name = sym.qualname.split(".", 1)
+        lines.extend(
+            [
+                "",
+                f"def test_{_safe_ident(cls_name)}_{_safe_ident(method_name)}_callable() -> None:",
+                f"    assert callable(getattr({cls_name}, {method_name!r}))",
+            ]
+        )
+        count += 1
 
     code = "\n".join(lines).rstrip() + "\n"
     try:

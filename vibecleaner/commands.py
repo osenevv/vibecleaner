@@ -11,6 +11,7 @@ from vibecleaner.cleanup import FixReport, fix_tree, revert_rule
 from vibecleaner.collector import CollectorError, collect
 from vibecleaner.deslop import CONCERN_BRIEFS, DESLOP_CONCERNS, slop_score
 from vibecleaner.deterministic import run_deterministic
+from vibecleaner.doctor import render_doctor_text, run_doctor
 from vibecleaner.fix_contract import Verdict
 from vibecleaner.init_cmd import render_init_summary, run_init
 from vibecleaner.models import PROJECT_RULE_PREFIX, Category, Finding, Severity
@@ -98,6 +99,10 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
     tests.add_argument("--no-report", action="store_true", help="do not write VIBECLEANER_TESTS.md")
     tests.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
 
+    doctor = sub.add_parser("doctor", help="check Python, Git, Docker, API keys, agent CLIs, and repo config")
+    doctor.add_argument("path", nargs="?", default=".", help="repository root (default: .)")
+    doctor.add_argument("--json", action="store_true", help="print JSON to stdout and nothing else")
+
     rule = sub.add_parser("rule", help="turn a correction into a project rule in .vibecleaner/rules.json")
     actions = rule.add_subparsers(dest="rule_command", required=True)
     pattern = actions.add_parser("add-pattern", help="ban a construct with a regex")
@@ -135,7 +140,15 @@ def add_subcommands(sub: argparse._SubParsersAction) -> None:
 
 def run_subcommand(args: argparse.Namespace) -> int | None:
     """Return an exit code for a command handled here, or None."""
-    handlers = {"init": _init, "fix": _fix, "deslop": _deslop, "preflight": _preflight, "tests": _tests, "rule": _rule}
+    handlers = {
+        "init": _init,
+        "fix": _fix,
+        "deslop": _deslop,
+        "preflight": _preflight,
+        "tests": _tests,
+        "doctor": _doctor,
+        "rule": _rule,
+    }
     handler = handlers.get(args.command)
     return handler(args) if handler is not None else None
 
@@ -583,3 +596,13 @@ def _gaps_fail_on(gaps, fail_on: str) -> bool:
         return False
     minimum = Severity(fail_on).rank
     return any(gap.severity.rank >= minimum for gap in gaps)
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    report = run_doctor(Path(args.path))
+    if args.json:
+        json.dump(report.to_dict(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(render_doctor_text(report))
+    return 1 if report.has_errors else 0

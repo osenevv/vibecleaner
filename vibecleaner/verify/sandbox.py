@@ -182,15 +182,21 @@ def _docker_argv(
         container,
         "--rm",
         "--init",
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
-        "--network",
-        "bridge" if network else "none",
-        "-v",
-        f"{root}:{root}",
-        "-w",
-        str(cwd),
     ]
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if callable(getuid) and callable(getgid):
+        argv.extend(["--user", f"{getuid()}:{getgid()}"])
+    argv.extend(
+        [
+            "--network",
+            "bridge" if network else "none",
+            "-v",
+            f"{root}:{root}",
+            "-w",
+            str(cwd),
+        ]
+    )
     for key, value in env.items():
         argv.extend(["-e", f"{key}={value}"])
     argv.append(image)
