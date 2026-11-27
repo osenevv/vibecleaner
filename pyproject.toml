@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Vladimir Osenev" }]
 dependencies = [
-    "tree-sitter>=0.23,<0.27",
+    "tree-sitter>=0.23,<0.28",
     "tree-sitter-python>=0.23,<0.26",
     "tree-sitter-typescript>=0.23,<0.24",
     "pathspec>=0.12",
